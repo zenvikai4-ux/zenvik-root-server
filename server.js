@@ -13,7 +13,7 @@ app.use(express.json());
 // ── ENV ───────────────────────────────────────────────
 const ZENVIK_PHONE_ID = process.env.ZENVIK_PHONE_ID || '1011169425416020';
 const ZENVIK_WA_TOKEN = process.env.ZENVIK_WA_TOKEN;
-const OWNER_PHONE     = (process.env.OWNER_PHONE || '919491399334').replace(/\D/g, '');
+const OWNER_PHONE     = (process.env.OWNER_PHONE || '919491399334').replace(/[^0-9]/g, '');
 const VERIFY_TOKEN    = process.env.VERIFY_TOKEN    || 'zenvikai2024';
 const GROQ_API_KEY    = process.env.GROQ_API_KEY;
 const SUPABASE_URL    = process.env.SUPABASE_URL;
@@ -226,7 +226,7 @@ async function handleZenvik(from, text, name) {
   await sendZenvik(from, reply);
   const urgent = ['demo','price','cost','urgent','complaint','help','refund'].some(k => text.toLowerCase().includes(k));
   if (urgent) await sendZenvik(OWNER_PHONE, `🔔 *Zenvik Alert*\n👤 ${name} (${from})\n💬 "${text}"`).catch(()=>{});
-  if (supabase) await supabase.from('zenvik_leads').insert({ name, phone: from, message: text, reply_sent: reply, needs_attention: urgent, source: 'whatsapp' }).catch(()=>{});
+  if (supabase) try { await supabase.from('zenvik_leads').insert({ name, phone: from, message: text, reply_sent: reply, needs_attention: urgent, source: 'whatsapp' }); } catch(e) { console.error('Supabase insert error:', e.message); }
   // Forward to Respond.io inbox
   forwardToRespondIO(from, text, name).catch(()=>{});
 }
@@ -235,8 +235,8 @@ async function handleGym(from, text, name, h) {
   const reply = h.autoReply || `Hi! 👋 Thanks for reaching out to *${h.name}*. We'll get back to you shortly!\n\n_Powered by Zenvik AI_`;
   await sendWA(ZENVIK_PHONE_ID, h.token || ZENVIK_WA_TOKEN, from, reply);
   if (supabase && h.gymId) {
-    await supabase.from('leads').insert({ gym_id: h.gymId, name, phone: from, source: 'whatsapp', status: 'enquiry', notes: text }).catch(()=>{});
-    await supabase.from('notifications').insert({ gym_id: h.gymId, title: `📩 New Lead — ${name}`, body: `${name}: "${text.slice(0,100)}"`, type: 'lead', is_read: false }).catch(()=>{});
+    try { await supabase.from('leads').insert({ gym_id: h.gymId, name, phone: from, source: 'whatsapp', status: 'enquiry', notes: text }); } catch(e) {}
+    try { await supabase.from('notifications').insert({ gym_id: h.gymId, title: `📩 New Lead — ${name}`, body: `${name}: "${text.slice(0,100)}"`, type: 'lead', is_read: false }); } catch(e) {}
   }
 }
 
@@ -292,10 +292,10 @@ app.post('/webhook', async (req, res) => {
         if (supabase) {
           const { data: gym } = await supabase.from('gyms').select('id,name').eq('instagram_page_id', entry.id).maybeSingle();
           if (gym) {
-            await supabase.from('leads').insert({ gym_id: gym.id, name: 'Instagram User', phone: senderId, source: 'instagram', status: 'enquiry', notes: text }).catch(()=>{});
-            await supabase.from('notifications').insert({ gym_id: gym.id, title: '📸 New Instagram Lead', body: `"${text.slice(0,100)}"`, type: 'lead', is_read: false }).catch(()=>{});
+            try { await supabase.from('leads').insert({ gym_id: gym.id, name: 'Instagram User', phone: senderId, source: 'instagram', status: 'enquiry', notes: text }); } catch(e) {}
+            try { await supabase.from('notifications').insert({ gym_id: gym.id, title: '📸 New Instagram Lead', body: `"${text.slice(0,100)}"`, type: 'lead', is_read: false }); } catch(e) {}
           } else {
-            await supabase.from('zenvik_leads').insert({ name: `Instagram ${senderId}`, message: text, source: 'instagram' }).catch(()=>{});
+            try { await supabase.from('zenvik_leads').insert({ name: `Instagram ${senderId}`, message: text, source: 'instagram' }); } catch(e) {}
           }
         }
       }
@@ -351,16 +351,24 @@ app.post('/lead', async (req, res) => {
     } catch(alertErr) {
       console.error(`❌ Owner alert failed:`, alertErr.message);
     }
-    if (supabase) await supabase.from('zenvik_leads').insert({ name, phone: to, message: `Demo: ${service}`, source: 'website_form', needs_attention: true }).catch(()=>{});
+    if (supabase) { try { await supabase.from('zenvik_leads').insert({ name, phone: to, message: `Demo: ${service}`, source: 'website_form', needs_attention: true }); } catch(e) { console.error('Supabase lead error:', e.message); } }
 
     // Add to Google Sheet and Calendar
     const leadData = { name, phone, business, service, budget, source: 'website_form' };
-    const [sheetDone, calendarLink] = await Promise.all([
-      addToSheet(leadData),
-      addToCalendar(leadData)
-    ]);
-    if (sheetDone) console.log('✅ Lead added to Google Sheet');
-    if (calendarLink) console.log('✅ Calendar event:', calendarLink);
+    console.log('📊 Adding to Google Sheet and Calendar...');
+    console.log('GOOGLE_SERVICE_ACCOUNT set:', !!process.env.GOOGLE_SERVICE_ACCOUNT);
+    try {
+      const [sheetDone, calendarLink] = await Promise.all([
+        addToSheet(leadData),
+        addToCalendar(leadData)
+      ]);
+      if (sheetDone) console.log('✅ Lead added to Google Sheet');
+      else console.log('❌ Google Sheet failed');
+      if (calendarLink) console.log('✅ Calendar event:', calendarLink);
+      else console.log('❌ Google Calendar failed');
+    } catch(googleErr) {
+      console.error('❌ Google integration error:', googleErr.message);
+    }
 
     res.json({ success: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
