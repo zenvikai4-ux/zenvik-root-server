@@ -22,6 +22,63 @@ const SUPABASE_KEY    = process.env.SUPABASE_SERVICE_KEY;
 const supabase = SUPABASE_URL && SUPABASE_KEY ? createClient(SUPABASE_URL, SUPABASE_KEY) : null;
 const groqClient = GROQ_API_KEY ? new Groq({ apiKey: GROQ_API_KEY }) : null;
 
+// ── RESPOND.IO CONFIG ─────────────────────────────────
+const RESPONDIO_API_KEY = process.env.RESPONDIO_API_KEY;
+const RESPONDIO_CHANNEL_ID = process.env.RESPONDIO_CHANNEL_ID || '497820';
+
+async function forwardToRespondIO(from, text, customerName) {
+  if (!RESPONDIO_API_KEY) return;
+  try {
+    const headers = {
+      'Authorization': `Bearer ${RESPONDIO_API_KEY}`,
+      'Content-Type': 'application/json'
+    };
+
+    // Step 1: Create or get contact
+    const contactRes = await fetch(`https://api.respond.io/v2/contact/phone:${from}`, {
+      method: 'GET',
+      headers
+    });
+
+    let contactId;
+    if (contactRes.ok) {
+      const contact = await contactRes.json();
+      contactId = contact.id;
+    } else {
+      // Create new contact
+      const createRes = await fetch('https://api.respond.io/v2/contact', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          phone: `+${from}`,
+          firstName: customerName || 'Customer',
+        })
+      });
+      const newContact = await createRes.json();
+      contactId = newContact.id;
+    }
+
+    if (!contactId) return;
+
+    // Step 2: Send message to Respond.io as incoming
+    await fetch(`https://api.respond.io/v2/contact/${contactId}/message`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        channelId: parseInt(RESPONDIO_CHANNEL_ID),
+        message: {
+          type: 'text',
+          text: text
+        }
+      })
+    });
+
+    console.log(`✅ Forwarded to Respond.io: ${customerName} (${from})`);
+  } catch(e) {
+    console.error('Respond.io forward error:', e.message);
+  }
+}
+
 // ── GOOGLE CONFIG ─────────────────────────────────────
 const SHEET_ID = process.env.GOOGLE_SHEET_ID || '1i-NyYMuTr50Pg249vCTrdU4kOy3X2YmQ76k_ua5MxTA';
 const CALENDAR_ID = process.env.GOOGLE_CALENDAR_ID || 'zenvikai.4@gmail.com';
@@ -170,6 +227,8 @@ async function handleZenvik(from, text, name) {
   const urgent = ['demo','price','cost','urgent','complaint','help','refund'].some(k => text.toLowerCase().includes(k));
   if (urgent) await sendZenvik(OWNER_PHONE, `🔔 *Zenvik Alert*\n👤 ${name} (${from})\n💬 "${text}"`).catch(()=>{});
   if (supabase) await supabase.from('zenvik_leads').insert({ name, phone: from, message: text, reply_sent: reply, needs_attention: urgent, source: 'whatsapp' }).catch(()=>{});
+  // Forward to Respond.io inbox
+  forwardToRespondIO(from, text, name).catch(()=>{});
 }
 
 async function handleGym(from, text, name, h) {
