@@ -130,26 +130,99 @@ async function addToSheet(data) {
   } catch(e) { console.error('Sheet error:', e.message); return false; }
 }
 
+async function findNextAvailableSlot(calendar) {
+  // Working hours: 9 AM to 6 PM IST, Mon-Sat
+  // Each slot is 1 hour
+  const SLOT_HOURS = [9, 10, 11, 12, 14, 15, 16, 17]; // skip 13 (lunch)
+  
+  const now = new Date();
+  // Start from tomorrow
+  const searchStart = new Date(now);
+  searchStart.setDate(searchStart.getDate() + 1);
+  searchStart.setHours(0, 0, 0, 0);
+  
+  // Search up to 7 days ahead
+  const searchEnd = new Date(searchStart);
+  searchEnd.setDate(searchEnd.getDate() + 7);
+
+  // Get existing events
+  const eventsRes = await calendar.events.list({
+    calendarId: CALENDAR_ID,
+    timeMin: searchStart.toISOString(),
+    timeMax: searchEnd.toISOString(),
+    singleEvents: true,
+    orderBy: 'startTime'
+  });
+  
+  const busySlots = (eventsRes.data.items || []).map(e => ({
+    start: new Date(e.start.dateTime || e.start.date),
+    end: new Date(e.end.dateTime || e.end.date)
+  }));
+
+  // Find first available slot
+  for (let d = 0; d < 7; d++) {
+    const date = new Date(searchStart);
+    date.setDate(date.getDate() + d);
+    
+    // Skip Sundays (0)
+    if (date.getDay() === 0) continue;
+    
+    for (const hour of SLOT_HOURS) {
+      const slotStart = new Date(date);
+      slotStart.setHours(hour, 0, 0, 0);
+      const slotEnd = new Date(slotStart.getTime() + 60 * 60 * 1000);
+      
+      // Check if slot overlaps with any existing event
+      const isBusy = busySlots.some(busy => 
+        slotStart < busy.end && slotEnd > busy.start
+      );
+      
+      if (!isBusy) return { start: slotStart, end: slotEnd };
+    }
+  }
+  
+  // Fallback: next day 11 AM
+  const fallback = new Date(searchStart);
+  fallback.setHours(11, 0, 0, 0);
+  return { start: fallback, end: new Date(fallback.getTime() + 60 * 60 * 1000) };
+}
+
+function formatIST(date) {
+  return date.toLocaleString('en-IN', { 
+    timeZone: 'Asia/Kolkata',
+    weekday: 'long',
+    day: 'numeric',
+    month: 'long',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: true
+  });
+}
+
 async function addToCalendar(data) {
   try {
     const auth = getGoogleAuth();
     if (!auth) return null;
     const calendar = google.calendar({ version: 'v3', auth });
-    const start = new Date();
-    start.setDate(start.getDate() + 1);
-    start.setHours(11, 0, 0, 0);
-    const end = new Date(start.getTime() + 60 * 60 * 1000);
+    
+    // Find next available slot
+    const slot = await findNextAvailableSlot(calendar);
+    
     const event = {
       summary: `🎯 Demo — ${data.name} | ${data.service || 'Zenvik AI'}`,
-      description: `👤 ${data.name}\n📱 ${data.phone}\n🏢 ${data.business || '-'}\n⚙️ ${data.service || '-'}\n💰 ${data.budget || '-'}\n📋 Source: ${data.source || 'Website'}`,
-      start: { dateTime: start.toISOString(), timeZone: 'Asia/Kolkata' },
-      end: { dateTime: end.toISOString(), timeZone: 'Asia/Kolkata' },
+      description: `👤 ${data.name}\n📱 ${data.phone}\n🏢 ${data.business || '-'}\n⚙️ ${data.service || '-'}\n💰 ${data.budget || '-'}\n📋 Source: ${data.source || 'Website'}\n\n📞 WhatsApp: https://wa.me/${(data.phone||'').replace(/\D/g,'')}`,
+      start: { dateTime: slot.start.toISOString(), timeZone: 'Asia/Kolkata' },
+      end: { dateTime: slot.end.toISOString(), timeZone: 'Asia/Kolkata' },
       reminders: { useDefault: false, overrides: [{ method: 'popup', minutes: 60 }, { method: 'popup', minutes: 15 }] },
     };
+    
     const res = await calendar.events.insert({ calendarId: CALENDAR_ID, requestBody: event });
-    console.log(`✅ Calendar event created`);
-    return res.data.htmlLink;
-  } catch(e) { console.error('Calendar error:', e.message); return null; }
+    console.log(`✅ Calendar event created: ${formatIST(slot.start)}`);
+    return { link: res.data.htmlLink, slot };
+  } catch(e) { 
+    console.error('Calendar error:', e.message); 
+    return null; 
+  }
 }
 
 // ── SYSTEM PROMPT ─────────────────────────────────────
@@ -344,30 +417,58 @@ app.post('/lead', async (req, res) => {
     const { name, phone, business, service, budget } = req.body;
     if (!name || !phone) return res.status(400).json({ error: 'Name and phone required' });
     const to = phone.replace(/\D/g,'').startsWith('91') ? phone.replace(/\D/g,'') : '91'+phone.replace(/\D/g,'');
-    await sendZenvik(to, `Hi ${name}! 👋\n\nThank you for your interest in *Zenvik AI*!\n\nDemo request for *${service||'our services'}* received.\n\nOur team will reach out within 2 hours.\n\n🌐 zenvikai.com | 📧 info@zenvikai.com\n— Team Zenvik AI`);
-    try {
-      await sendZenvik(OWNER_PHONE, `🔔 *New Demo Request*\n\n👤 ${name}\n📱 ${phone}\n🏢 ${business||'-'}\n⚙️ ${service||'-'}\n💰 ${budget||'-'}\n⏰ ${new Date().toLocaleString('en-IN',{timeZone:'Asia/Kolkata'})}`);
-      console.log(`✅ Owner alert sent to ${OWNER_PHONE}`);
-    } catch(alertErr) {
-      console.error(`❌ Owner alert failed:`, alertErr.message);
-    }
-    if (supabase) { try { await supabase.from('zenvik_leads').insert({ name, phone: to, message: `Demo: ${service}`, source: 'website_form', needs_attention: true }); } catch(e) { console.error('Supabase lead error:', e.message); } }
-
-    // Add to Google Sheet and Calendar
+    // Add to Google Sheet and Calendar FIRST to get slot time
     const leadData = { name, phone, business, service, budget, source: 'website_form' };
     console.log('📊 Adding to Google Sheet and Calendar...');
-    console.log('GOOGLE_SERVICE_ACCOUNT set:', !!process.env.GOOGLE_SERVICE_ACCOUNT);
+    
+    let bookedSlot = null;
     try {
-      const [sheetDone, calendarLink] = await Promise.all([
+      const [sheetDone, calendarResult] = await Promise.all([
         addToSheet(leadData),
         addToCalendar(leadData)
       ]);
       if (sheetDone) console.log('✅ Lead added to Google Sheet');
       else console.log('❌ Google Sheet failed');
-      if (calendarLink) console.log('✅ Calendar event:', calendarLink);
-      else console.log('❌ Google Calendar failed');
+      if (calendarResult) {
+        bookedSlot = calendarResult.slot;
+        console.log('✅ Calendar event created:', formatIST(bookedSlot.start));
+      } else console.log('❌ Google Calendar failed');
     } catch(googleErr) {
       console.error('❌ Google integration error:', googleErr.message);
+    }
+
+    // Send confirmation with actual booked time
+    const slotText = bookedSlot 
+      ? `📅 *Demo Scheduled:* ${formatIST(bookedSlot.start)}`
+      : `📅 Our team will contact you within 2 hours to schedule your demo.`;
+
+    await sendZenvik(to, `Hi ${name}! 👋\n\nThank you for your interest in *Zenvik AI*!\n\n✅ Demo request for *${service||'our services'}* confirmed!\n\n${slotText}\n\n📞 We'll call/WhatsApp you at this number.\n🌐 zenvikai.com | 📧 info@zenvikai.com\n\n— Team Zenvik AI`);
+    
+    // Owner alert
+    const ownerMsg = `🔔 *New Demo Request — Zenvik AI*\n\n👤 ${name}\n📱 ${phone}\n🏢 ${business||'-'}\n⚙️ ${service||'-'}\n💰 ${budget||'-'}\n${slotText}\n⏰ ${new Date().toLocaleString('en-IN',{timeZone:'Asia/Kolkata'})}`;
+    
+    try {
+      await sendZenvik(OWNER_PHONE, ownerMsg);
+      console.log(`✅ Owner alert sent to ${OWNER_PHONE}`);
+    } catch(alertErr) {
+      console.error(`❌ Owner alert failed:`, alertErr.message);
+      // Try without formatting
+      try {
+        await sendZenvik(OWNER_PHONE, `New demo: ${name} ${phone} ${service||''}`);
+      } catch(e2) {
+        console.error('Owner alert retry failed:', e2.message);
+      }
+    }
+
+    if (supabase) { 
+      try { 
+        await supabase.from('zenvik_leads').insert({ 
+          name, phone: to, 
+          message: `Demo: ${service}`, 
+          source: 'website_form', 
+          needs_attention: true 
+        }); 
+      } catch(e) { console.error('Supabase lead error:', e.message); } 
     }
 
     res.json({ success: true });
