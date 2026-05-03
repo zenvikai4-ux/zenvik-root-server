@@ -3,6 +3,7 @@ const express = require('express');
 const cors = require('cors');
 const { createClient } = require('@supabase/supabase-js');
 const Groq = require('groq-sdk');
+const { google } = require('googleapis');
 
 const app = express();
 app.use(cors({ origin: '*', methods: ['GET', 'POST', 'OPTIONS'], allowedHeaders: ['Content-Type', 'Authorization'] }));
@@ -20,6 +21,79 @@ const SUPABASE_KEY    = process.env.SUPABASE_SERVICE_KEY;
 
 const supabase = SUPABASE_URL && SUPABASE_KEY ? createClient(SUPABASE_URL, SUPABASE_KEY) : null;
 const groqClient = GROQ_API_KEY ? new Groq({ apiKey: GROQ_API_KEY }) : null;
+
+// ── GOOGLE CONFIG ─────────────────────────────────────
+const SHEET_ID = process.env.GOOGLE_SHEET_ID || '1i-NyYMuTr50Pg249vCTrdU4kOy3X2YmQ76k_ua5MxTA';
+const CALENDAR_ID = process.env.GOOGLE_CALENDAR_ID || 'zenvikai.4@gmail.com';
+
+function getGoogleAuth() {
+  if (!process.env.GOOGLE_SERVICE_ACCOUNT) return null;
+  try {
+    const credentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT);
+    return new google.auth.GoogleAuth({
+      credentials,
+      scopes: [
+        'https://www.googleapis.com/auth/spreadsheets',
+        'https://www.googleapis.com/auth/calendar'
+      ],
+    });
+  } catch(e) {
+    console.error('Google auth error:', e.message);
+    return null;
+  }
+}
+
+async function addToSheet(data) {
+  try {
+    const auth = getGoogleAuth();
+    if (!auth) return false;
+    const sheets = google.sheets({ version: 'v4', auth });
+    // Ensure header
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: SHEET_ID,
+      range: 'Sheet1!A1:H1',
+      valueInputOption: 'RAW',
+      requestBody: { values: [['Date & Time', 'Name', 'Phone', 'Business', 'Service', 'Budget', 'Source', 'Notes']] }
+    }).catch(() => {});
+    // Append row
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: SHEET_ID,
+      range: 'Sheet1!A:H',
+      valueInputOption: 'RAW',
+      insertDataOption: 'INSERT_ROWS',
+      requestBody: { values: [[
+        new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }),
+        data.name || '', data.phone || '', data.business || '',
+        data.service || '', data.budget || '',
+        data.source || 'website', data.notes || ''
+      ]]}
+    });
+    console.log(`✅ Sheet updated: ${data.name}`);
+    return true;
+  } catch(e) { console.error('Sheet error:', e.message); return false; }
+}
+
+async function addToCalendar(data) {
+  try {
+    const auth = getGoogleAuth();
+    if (!auth) return null;
+    const calendar = google.calendar({ version: 'v3', auth });
+    const start = new Date();
+    start.setDate(start.getDate() + 1);
+    start.setHours(11, 0, 0, 0);
+    const end = new Date(start.getTime() + 60 * 60 * 1000);
+    const event = {
+      summary: `🎯 Demo — ${data.name} | ${data.service || 'Zenvik AI'}`,
+      description: `👤 ${data.name}\n📱 ${data.phone}\n🏢 ${data.business || '-'}\n⚙️ ${data.service || '-'}\n💰 ${data.budget || '-'}\n📋 Source: ${data.source || 'Website'}`,
+      start: { dateTime: start.toISOString(), timeZone: 'Asia/Kolkata' },
+      end: { dateTime: end.toISOString(), timeZone: 'Asia/Kolkata' },
+      reminders: { useDefault: false, overrides: [{ method: 'popup', minutes: 60 }, { method: 'popup', minutes: 15 }] },
+    };
+    const res = await calendar.events.insert({ calendarId: CALENDAR_ID, requestBody: event });
+    console.log(`✅ Calendar event created`);
+    return res.data.htmlLink;
+  } catch(e) { console.error('Calendar error:', e.message); return null; }
+}
 
 // ── SYSTEM PROMPT ─────────────────────────────────────
 const ZENVIK_PROMPT = `You are Zenvikai, a friendly AI assistant for Zenvik AI — business automation company in Ongole, AP, India.
@@ -219,6 +293,16 @@ app.post('/lead', async (req, res) => {
       console.error(`❌ Owner alert failed:`, alertErr.message);
     }
     if (supabase) await supabase.from('zenvik_leads').insert({ name, phone: to, message: `Demo: ${service}`, source: 'website_form', needs_attention: true }).catch(()=>{});
+
+    // Add to Google Sheet and Calendar
+    const leadData = { name, phone, business, service, budget, source: 'website_form' };
+    const [sheetDone, calendarLink] = await Promise.all([
+      addToSheet(leadData),
+      addToCalendar(leadData)
+    ]);
+    if (sheetDone) console.log('✅ Lead added to Google Sheet');
+    if (calendarLink) console.log('✅ Calendar event:', calendarLink);
+
     res.json({ success: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
