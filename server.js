@@ -523,7 +523,13 @@ app.post('/lead', async (req, res) => {
       ? `📅 *Demo Scheduled:* ${formatIST(bookedSlot.start)}`
       : `📅 Our team will contact you within 2 hours to schedule your demo.`;
 
-    await sendZenvik(to, `Hi ${name}! 👋\n\nThank you for your interest in *Zenvik AI*!\n\n✅ Demo request for *${service||'our services'}* confirmed!\n\n${slotText}\n\n📞 We'll call/WhatsApp you at this number.\n🌐 zenvikai.com | 📧 info@zenvikai.com\n\n— Team Zenvik AI`);
+    console.log(`📱 Sending confirmation to: ${to}`);
+    try {
+      await sendZenvik(to, `Hi ${name}! 👋\n\nThank you for your interest in *Zenvik AI*!\n\n✅ Demo request for *${service||'our services'}* confirmed!\n\n${slotText}\n\n📞 We'll call/WhatsApp you at this number.\n🌐 zenvikai.com | 📧 info@zenvikai.com\n\n— Team Zenvik AI`);
+      console.log(`✅ Client confirmation sent to ${to}`);
+    } catch(clientErr) {
+      console.error(`❌ Client confirmation failed:`, clientErr.message);
+    }
     
     // Owner alert
     const ownerMsg = `🔔 *New Demo Request — Zenvik AI*\n\n👤 ${name}\n📱 ${phone}\n🏢 ${business||'-'}\n⚙️ ${service||'-'}\n💰 ${budget||'-'}\n${slotText}\n⏰ ${new Date().toLocaleString('en-IN',{timeZone:'Asia/Kolkata'})}`;
