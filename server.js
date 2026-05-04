@@ -227,9 +227,34 @@ async function addToCalendar(data) {
 
 // ── SYSTEM PROMPT ─────────────────────────────────────
 const ZENVIK_PROMPT = `You are Zenvikai, a friendly AI assistant for Zenvik AI — business automation company in Ongole, AP, India.
-Services: 1) Gym App — WhatsApp leads, memberships, fee reminders, diet plans, mobile app 2) School App — bus GPS, homework, attendance, report cards 3) Salon Automation — WhatsApp booking & reminders 4) Website Creation — live in 48 hours 5) Vendor Agent — AI vendor communication 6) Voice Agent — answers calls in Telugu/Hindi/English
-Facts: Free 30-min demo, setup in 48 hours, no hidden charges. Contact: info@zenvikai.com | +91 94913 99334. Website: zenvikai.com
-Rules: Reply in 2-4 sentences. Use customer's language. Never make up pricing. Always suggest free demo.`;
+
+Services:
+1) Gym App — WhatsApp leads, memberships, fee reminders, diet plans, mobile app
+2) School App — bus GPS, homework, attendance, report cards, parent chat
+3) Salon Automation — WhatsApp booking, reminders, follow-ups
+4) Website Creation — custom websites live in 48 hours
+5) Vendor Agent — AI vendor communication and purchase orders
+6) Voice Agent — AI answers calls 24/7 in Telugu, Hindi, English
+7) Custom Development — any custom mobile app, web platform or AI agent
+
+Facts:
+- Free 30-min demo, setup in 48 hours, no hidden charges
+- Contact: info@zenvikai.com | +91 94913 99334 | zenvikai.com
+- MSME registered, based in Ongole AP
+
+Appointment rules:
+- When someone wants to book or reschedule a demo, say our team will contact them shortly to confirm the exact time
+- NEVER ask for a specific time yourself — our team handles scheduling
+- If they mention a preferred time, acknowledge it and say our team will confirm
+- For reschedule requests say: I have noted your request. Our team will contact you within 1 hour to confirm a new time
+- Do NOT restart the demo booking flow if already discussed in this conversation
+
+Conversation rules:
+- Keep replies to 2-4 sentences maximum
+- Respond in customer language — Telugu, Hindi or English
+- Never make up pricing — say it is customized based on requirements
+- Be warm and professional
+- For complaints or urgent issues, say our team will respond within 1 hour`;
 
 // ── PRODUCT REGISTRY ──────────────────────────────────
 // phone_number_id → product handler
@@ -268,6 +293,29 @@ async function sendWA(phoneId, token, to, msg) {
 
 const sendZenvik = (to, msg) => sendWA(ZENVIK_PHONE_ID, ZENVIK_WA_TOKEN, to, msg);
 
+// ── CONVERSATION MEMORY ──────────────────────────────
+const conversationHistory = new Map(); // phone → [{role, content}]
+
+function getHistory(phone) {
+  if (!conversationHistory.has(phone)) {
+    conversationHistory.set(phone, []);
+  }
+  return conversationHistory.get(phone);
+}
+
+function addToHistory(phone, role, content) {
+  const history = getHistory(phone);
+  history.push({ role, content });
+  // Keep last 10 messages only
+  if (history.length > 10) history.shift();
+}
+
+// Clean old conversations every hour
+setInterval(() => {
+  conversationHistory.clear();
+  console.log('🧹 Conversation history cleared');
+}, 60 * 60 * 1000);
+
 async function groqReply(prompt, text, name = 'Customer') {
   if (!groqClient) {
     console.warn('⚠️ Groq client not initialized — check GROQ_API_KEY');
@@ -277,7 +325,7 @@ async function groqReply(prompt, text, name = 'Customer') {
     const completion = await groqClient.chat.completions.create({
       model: 'llama-3.1-8b-instant',
       max_tokens: 200,
-      temperature: 0.8,
+      temperature: 0.7,
       messages: [
         { role: 'system', content: prompt },
         { role: 'user', content: `${name} says: "${text}"` }
@@ -292,13 +340,46 @@ async function groqReply(prompt, text, name = 'Customer') {
   }
 }
 
+async function groqReplyWithHistory(phone, text, name = 'Customer') {
+  if (!groqClient) return null;
+  try {
+    const history = getHistory(phone);
+    addToHistory(phone, 'user', `${name} says: "${text}"`);
+    
+    const completion = await groqClient.chat.completions.create({
+      model: 'llama-3.1-8b-instant',
+      max_tokens: 200,
+      temperature: 0.7,
+      messages: [
+        { role: 'system', content: ZENVIK_PROMPT },
+        ...history
+      ]
+    });
+    
+    const reply = completion.choices?.[0]?.message?.content || null;
+    if (reply) addToHistory(phone, 'assistant', reply);
+    console.log(`🤖 Groq reply: "${reply?.slice(0,60)}"`);
+    return reply;
+  } catch(e) {
+    console.error('groqReplyWithHistory error:', e.message);
+    return null;
+  }
+}
+
 // ── MESSAGE HANDLERS ──────────────────────────────────
 async function handleZenvik(from, text, name) {
-  const reply = await groqReply(ZENVIK_PROMPT, text, name)
+  const reply = await groqReplyWithHistory(from, text, name)
     || `Hi! Welcome to Zenvik AI 👋\n\n1 - Book Free Demo\n2 - Pricing\n3 - Our Services\n\nVisit zenvikai.com`;
   await sendZenvik(from, reply);
-  const urgent = ['demo','price','cost','urgent','complaint','help','refund'].some(k => text.toLowerCase().includes(k));
-  if (urgent) await sendZenvik(OWNER_PHONE, `🔔 *Zenvik Alert*\n👤 ${name} (${from})\n💬 "${text}"`).catch(()=>{});
+  const urgent = ['demo','price','cost','urgent','complaint','help','refund','reschedule','cancel','problem'].some(k => text.toLowerCase().includes(k));
+  if (urgent) {
+    try {
+      await sendZenvik(OWNER_PHONE, `🔔 *Zenvik Alert*\n👤 ${name}\n📱 +${from}\n💬 "${text.slice(0,200)}"`);
+      console.log('✅ Owner alert sent');
+    } catch(e) {
+      console.error('Owner alert failed:', e.message);
+    }
+  }
   if (supabase) try { await supabase.from('zenvik_leads').insert({ name, phone: from, message: text, reply_sent: reply, needs_attention: urgent, source: 'whatsapp' }); } catch(e) { console.error('Supabase insert error:', e.message); }
   // Forward to Respond.io inbox
   forwardToRespondIO(from, text, name).catch(()=>{});
