@@ -33,50 +33,26 @@ async function forwardToRespondIO(from, text, customerName) {
       'Authorization': `Bearer ${RESPONDIO_API_KEY}`,
       'Content-Type': 'application/json'
     };
-
-    // Step 1: Create or get contact
-    const contactRes = await fetch(`https://api.respond.io/v2/contact/phone:${from}`, {
-      method: 'GET',
-      headers
-    });
-
+    const contactRes = await fetch(`https://api.respond.io/v2/contact/phone:${from}`, { method: 'GET', headers });
     let contactId;
     if (contactRes.ok) {
       const contact = await contactRes.json();
       contactId = contact.id;
     } else {
-      // Create new contact
       const createRes = await fetch('https://api.respond.io/v2/contact', {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({
-          phone: `+${from}`,
-          firstName: customerName || 'Customer',
-        })
+        method: 'POST', headers,
+        body: JSON.stringify({ phone: `+${from}`, firstName: customerName || 'Customer' })
       });
       const newContact = await createRes.json();
       contactId = newContact.id;
     }
-
     if (!contactId) return;
-
-    // Step 2: Send message to Respond.io as incoming
     await fetch(`https://api.respond.io/v2/contact/${contactId}/message`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
-        channelId: parseInt(RESPONDIO_CHANNEL_ID),
-        message: {
-          type: 'text',
-          text: text
-        }
-      })
+      method: 'POST', headers,
+      body: JSON.stringify({ channelId: parseInt(RESPONDIO_CHANNEL_ID), message: { type: 'text', text } })
     });
-
     console.log(`✅ Forwarded to Respond.io: ${customerName} (${from})`);
-  } catch(e) {
-    console.error('Respond.io forward error:', e.message);
-  }
+  } catch(e) { console.error('Respond.io forward error:', e.message); }
 }
 
 // ── GOOGLE CONFIG ─────────────────────────────────────
@@ -89,15 +65,9 @@ function getGoogleAuth() {
     const credentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT);
     return new google.auth.GoogleAuth({
       credentials,
-      scopes: [
-        'https://www.googleapis.com/auth/spreadsheets',
-        'https://www.googleapis.com/auth/calendar'
-      ],
+      scopes: ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/calendar'],
     });
-  } catch(e) {
-    console.error('Google auth error:', e.message);
-    return null;
-  }
+  } catch(e) { console.error('Google auth error:', e.message); return null; }
 }
 
 async function addToSheet(data) {
@@ -105,24 +75,16 @@ async function addToSheet(data) {
     const auth = getGoogleAuth();
     if (!auth) return false;
     const sheets = google.sheets({ version: 'v4', auth });
-    // Ensure header
     await sheets.spreadsheets.values.update({
-      spreadsheetId: SHEET_ID,
-      range: 'Sheet1!A1:H1',
-      valueInputOption: 'RAW',
+      spreadsheetId: SHEET_ID, range: 'Sheet1!A1:H1', valueInputOption: 'RAW',
       requestBody: { values: [['Date & Time', 'Name', 'Phone', 'Business', 'Service', 'Budget', 'Source', 'Notes']] }
     }).catch(() => {});
-    // Append row
     await sheets.spreadsheets.values.append({
-      spreadsheetId: SHEET_ID,
-      range: 'Sheet1!A:H',
-      valueInputOption: 'RAW',
-      insertDataOption: 'INSERT_ROWS',
+      spreadsheetId: SHEET_ID, range: 'Sheet1!A:H', valueInputOption: 'RAW', insertDataOption: 'INSERT_ROWS',
       requestBody: { values: [[
         new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }),
         data.name || '', data.phone || '', data.business || '',
-        data.service || '', data.budget || '',
-        data.source || 'website', data.notes || ''
+        data.service || '', data.budget || '', data.source || 'website', data.notes || ''
       ]]}
     });
     console.log(`✅ Sheet updated: ${data.name}`);
@@ -131,71 +93,42 @@ async function addToSheet(data) {
 }
 
 async function findNextAvailableSlot(calendar) {
-  // Working hours: 9 AM to 6 PM IST, Mon-Sat
-  // Each slot is 1 hour
-  const SLOT_HOURS = [9, 10, 11, 12, 14, 15, 16, 17]; // skip 13 (lunch)
-  
+  const SLOT_HOURS = [9, 10, 11, 12, 14, 15, 16, 17];
   const now = new Date();
-  // Start from tomorrow
   const searchStart = new Date(now);
   searchStart.setDate(searchStart.getDate() + 1);
   searchStart.setHours(0, 0, 0, 0);
-  
-  // Search up to 7 days ahead
   const searchEnd = new Date(searchStart);
   searchEnd.setDate(searchEnd.getDate() + 7);
-
-  // Get existing events
   const eventsRes = await calendar.events.list({
-    calendarId: CALENDAR_ID,
-    timeMin: searchStart.toISOString(),
-    timeMax: searchEnd.toISOString(),
-    singleEvents: true,
-    orderBy: 'startTime'
+    calendarId: CALENDAR_ID, timeMin: searchStart.toISOString(), timeMax: searchEnd.toISOString(),
+    singleEvents: true, orderBy: 'startTime'
   });
-  
   const busySlots = (eventsRes.data.items || []).map(e => ({
     start: new Date(e.start.dateTime || e.start.date),
     end: new Date(e.end.dateTime || e.end.date)
   }));
-
-  // Find first available slot
   for (let d = 0; d < 7; d++) {
     const date = new Date(searchStart);
     date.setDate(date.getDate() + d);
-    
-    // Skip Sundays (0)
     if (date.getDay() === 0) continue;
-    
     for (const hour of SLOT_HOURS) {
       const slotStart = new Date(date);
       slotStart.setHours(hour, 0, 0, 0);
       const slotEnd = new Date(slotStart.getTime() + 60 * 60 * 1000);
-      
-      // Check if slot overlaps with any existing event
-      const isBusy = busySlots.some(busy => 
-        slotStart < busy.end && slotEnd > busy.start
-      );
-      
+      const isBusy = busySlots.some(busy => slotStart < busy.end && slotEnd > busy.start);
       if (!isBusy) return { start: slotStart, end: slotEnd };
     }
   }
-  
-  // Fallback: next day 11 AM
   const fallback = new Date(searchStart);
   fallback.setHours(11, 0, 0, 0);
   return { start: fallback, end: new Date(fallback.getTime() + 60 * 60 * 1000) };
 }
 
 function formatIST(date) {
-  return date.toLocaleString('en-IN', { 
-    timeZone: 'Asia/Kolkata',
-    weekday: 'long',
-    day: 'numeric',
-    month: 'long',
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: true
+  return date.toLocaleString('en-IN', {
+    timeZone: 'Asia/Kolkata', weekday: 'long', day: 'numeric',
+    month: 'long', hour: '2-digit', minute: '2-digit', hour12: true
   });
 }
 
@@ -204,10 +137,7 @@ async function addToCalendar(data) {
     const auth = getGoogleAuth();
     if (!auth) return null;
     const calendar = google.calendar({ version: 'v3', auth });
-    
-    // Find next available slot
     const slot = await findNextAvailableSlot(calendar);
-    
     const event = {
       summary: `🎯 Demo — ${data.name} | ${data.service || 'Zenvik AI'}`,
       description: `👤 ${data.name}\n📱 ${data.phone}\n🏢 ${data.business || '-'}\n⚙️ ${data.service || '-'}\n💰 ${data.budget || '-'}\n📋 Source: ${data.source || 'Website'}\n\n📞 WhatsApp: https://wa.me/${(data.phone||'').replace(/\D/g,'')}`,
@@ -215,14 +145,10 @@ async function addToCalendar(data) {
       end: { dateTime: slot.end.toISOString(), timeZone: 'Asia/Kolkata' },
       reminders: { useDefault: false, overrides: [{ method: 'popup', minutes: 60 }, { method: 'popup', minutes: 15 }] },
     };
-    
     const res = await calendar.events.insert({ calendarId: CALENDAR_ID, requestBody: event });
     console.log(`✅ Calendar event created: ${formatIST(slot.start)}`);
     return { link: res.data.htmlLink, slot };
-  } catch(e) { 
-    console.error('Calendar error:', e.message); 
-    return null; 
-  }
+  } catch(e) { console.error('Calendar error:', e.message); return null; }
 }
 
 // ── SYSTEM PROMPT ─────────────────────────────────────
@@ -257,7 +183,6 @@ Conversation rules:
 - For complaints or urgent issues, say our team will respond within 1 hour`;
 
 // ── PRODUCT REGISTRY ──────────────────────────────────
-// phone_number_id → product handler
 const PRODUCT_HANDLERS = {};
 
 async function loadGymNumbers() {
@@ -293,76 +218,165 @@ async function sendWA(phoneId, token, to, msg) {
 
 const sendZenvik = (to, msg) => sendWA(ZENVIK_PHONE_ID, ZENVIK_WA_TOKEN, to, msg);
 
-// ── CONVERSATION MEMORY ──────────────────────────────
-const conversationHistory = new Map(); // phone → [{role, content}]
+// ── CONVERSATION MEMORY ───────────────────────────────
+const conversationHistory = new Map();
 
 function getHistory(phone) {
-  if (!conversationHistory.has(phone)) {
-    conversationHistory.set(phone, []);
-  }
+  if (!conversationHistory.has(phone)) conversationHistory.set(phone, []);
   return conversationHistory.get(phone);
 }
 
 function addToHistory(phone, role, content) {
   const history = getHistory(phone);
   history.push({ role, content });
-  // Keep last 10 messages only
   if (history.length > 10) history.shift();
 }
 
-// Clean old conversations every hour
 setInterval(() => {
   conversationHistory.clear();
   console.log('🧹 Conversation history cleared');
 }, 60 * 60 * 1000);
-
-async function groqReply(prompt, text, name = 'Customer') {
-  if (!groqClient) {
-    console.warn('⚠️ Groq client not initialized — check GROQ_API_KEY');
-    return null;
-  }
-  try {
-    const completion = await groqClient.chat.completions.create({
-      model: 'llama-3.1-8b-instant',
-      max_tokens: 200,
-      temperature: 0.7,
-      messages: [
-        { role: 'system', content: prompt },
-        { role: 'user', content: `${name} says: "${text}"` }
-      ]
-    });
-    const reply = completion.choices?.[0]?.message?.content || null;
-    console.log(`🤖 Groq reply: "${reply?.slice(0,60)}"`);
-    return reply;
-  } catch(e) {
-    console.error('groqReply error:', e.message);
-    return null;
-  }
-}
 
 async function groqReplyWithHistory(phone, text, name = 'Customer') {
   if (!groqClient) return null;
   try {
     const history = getHistory(phone);
     addToHistory(phone, 'user', `${name} says: "${text}"`);
-    
     const completion = await groqClient.chat.completions.create({
-      model: 'llama-3.1-8b-instant',
-      max_tokens: 200,
-      temperature: 0.7,
-      messages: [
-        { role: 'system', content: ZENVIK_PROMPT },
-        ...history
-      ]
+      model: 'llama-3.1-8b-instant', max_tokens: 200, temperature: 0.7,
+      messages: [{ role: 'system', content: ZENVIK_PROMPT }, ...history]
     });
-    
     const reply = completion.choices?.[0]?.message?.content || null;
     if (reply) addToHistory(phone, 'assistant', reply);
     console.log(`🤖 Groq reply: "${reply?.slice(0,60)}"`);
     return reply;
-  } catch(e) {
-    console.error('groqReplyWithHistory error:', e.message);
-    return null;
+  } catch(e) { console.error('groqReplyWithHistory error:', e.message); return null; }
+}
+
+// ── GYM BROADCAST PROCESSOR ───────────────────────────
+// Runs every 30 seconds — picks up pending whatsapp_logs rows inserted
+// by the GymApp broadcast feature and sends them via each gym's
+// configured WhatsApp number.
+let broadcastRunning = false;
+
+async function processBroadcastQueue() {
+  if (!supabase || broadcastRunning) return;
+  broadcastRunning = true;
+  try {
+    // Fetch all pending broadcast rows
+    const { data: pending, error } = await supabase
+      .from('whatsapp_logs')
+      .select('*')
+      .eq('status', 'pending')
+      .order('created_at', { ascending: true })
+      .limit(20);
+
+    if (error) { console.error('Broadcast queue fetch error:', error.message); return; }
+    if (!pending || pending.length === 0) return;
+
+    console.log(`📨 Processing ${pending.length} pending broadcast(s)...`);
+
+    for (const log of pending) {
+      // Mark as processing immediately to avoid duplicate sends
+      await supabase
+        .from('whatsapp_logs')
+        .update({ status: 'processing' })
+        .eq('id', log.id);
+
+      try {
+        // Get this gym's WhatsApp credentials
+        const { data: gym } = await supabase
+          .from('gyms')
+          .select('whatsapp_phone_id, whatsapp_token, name')
+          .eq('id', log.gym_id)
+          .single();
+
+        if (!gym?.whatsapp_phone_id || !gym?.whatsapp_token) {
+          console.warn(`⚠️ No WhatsApp credentials for gym ${log.gym_id} — skipping`);
+          await supabase
+            .from('whatsapp_logs')
+            .update({ status: 'failed', fail_count: 0, sent_count: 0 })
+            .eq('id', log.id);
+          continue;
+        }
+
+        // Determine recipient phones based on recipient_type
+        const recipientType = log.recipient_type || 'clients';
+        let phones = [];
+
+        if (recipientType === 'clients' || recipientType === 'both') {
+          const { data: members } = await supabase
+            .from('members')
+            .select('phone')
+            .eq('gym_id', log.gym_id)
+            .eq('status', 'active');
+          phones.push(...(members || []).map(m => m.phone).filter(Boolean));
+        }
+
+        if (recipientType === 'trainers' || recipientType === 'both') {
+          const { data: trainers } = await supabase
+            .from('profiles')
+            .select('phone')
+            .eq('gym_id', log.gym_id)
+            .eq('role', 'trainer');
+          phones.push(...(trainers || []).map(t => t.phone).filter(Boolean));
+        }
+
+        // Deduplicate
+        phones = [...new Set(phones)];
+
+        if (phones.length === 0) {
+          console.log(`ℹ️ No recipients found for gym ${gym.name} — marking sent`);
+          await supabase
+            .from('whatsapp_logs')
+            .update({ status: 'sent', sent_count: 0, fail_count: 0 })
+            .eq('id', log.id);
+          continue;
+        }
+
+        console.log(`📤 Sending to ${phones.length} recipients for [${gym.name}]...`);
+
+        // Send to each phone using the gym's own credentials
+        let sentCount = 0;
+        let failCount = 0;
+
+        for (const phone of phones) {
+          try {
+            // Normalize to E.164 (default +91 India)
+            let e164 = phone.replace(/[\s\-()]/g, '');
+            if (!e164.startsWith('+')) e164 = '+91' + e164.replace(/^0/, '');
+            e164 = e164.replace('+', '');
+
+            await sendWA(gym.whatsapp_phone_id, gym.whatsapp_token, e164, log.message);
+            sentCount++;
+          } catch (sendErr) {
+            console.error(`❌ Failed to send to ${phone}:`, sendErr.message);
+            failCount++;
+          }
+          // Small delay between messages to avoid Meta rate limits
+          await new Promise(r => setTimeout(r, 200));
+        }
+
+        const finalStatus = failCount === 0 ? 'sent' : sentCount > 0 ? 'partial' : 'failed';
+        await supabase
+          .from('whatsapp_logs')
+          .update({ status: finalStatus, sent_count: sentCount, fail_count: failCount })
+          .eq('id', log.id);
+
+        console.log(`✅ Broadcast done for [${gym.name}]: ${sentCount} sent, ${failCount} failed`);
+
+      } catch (logErr) {
+        console.error(`❌ Error processing broadcast ${log.id}:`, logErr.message);
+        await supabase
+          .from('whatsapp_logs')
+          .update({ status: 'failed' })
+          .eq('id', log.id);
+      }
+    }
+  } catch (e) {
+    console.error('processBroadcastQueue error:', e.message);
+  } finally {
+    broadcastRunning = false;
   }
 }
 
@@ -376,13 +390,10 @@ async function handleZenvik(from, text, name) {
     try {
       await sendZenvik(OWNER_PHONE, `🔔 *Zenvik Alert*\n👤 ${name}\n📱 +${from}\n💬 "${text.slice(0,200)}"`);
       console.log('✅ Owner alert sent');
-    } catch(e) {
-      console.error('Owner alert failed:', e.message);
-    }
+    } catch(e) { console.error('Owner alert failed:', e.message); }
   }
   if (supabase) try { await supabase.from('zenvik_leads').insert({ name, phone: from, message: text, reply_sent: reply, needs_attention: urgent, source: 'whatsapp' }); } catch(e) { console.error('Supabase insert error:', e.message); }
-  // Forward to Respond.io inbox
-  forwardToRespondIO(from, text, name).catch(()=>{});
+  forwardToRespondIO(from, text, name).catch(() => {});
 }
 
 async function handleGym(from, text, name, h) {
@@ -395,9 +406,8 @@ async function handleGym(from, text, name, h) {
 }
 
 // ── ROUTES ────────────────────────────────────────────
-app.get('/', (req, res) => res.json({ status: 'Zenvik AI Root Server', version: '4.0', products: ['gym','school','salon','website','vendor','voice'] }));
+app.get('/', (req, res) => res.json({ status: 'Zenvik AI Root Server', version: '4.1', products: ['gym','school','salon','website','vendor','voice'] }));
 
-// Webhook verify
 app.get('/webhook', (req, res) => {
   if (req.query['hub.mode'] === 'subscribe' && req.query['hub.verify_token'] === VERIFY_TOKEN) {
     console.log('✅ Webhook verified');
@@ -406,13 +416,11 @@ app.get('/webhook', (req, res) => {
   res.sendStatus(403);
 });
 
-// Unified webhook
 app.post('/webhook', async (req, res) => {
   res.sendStatus(200);
   const body = req.body;
   if (!body?.object) return;
 
-  // WhatsApp
   if (body.object === 'whatsapp_business_account') {
     for (const entry of body.entry || []) {
       for (const change of entry.changes || []) {
@@ -436,7 +444,6 @@ app.post('/webhook', async (req, res) => {
     }
   }
 
-  // Instagram
   if (body.object === 'instagram') {
     for (const entry of body.entry || []) {
       for (const m of entry.messaging || []) {
@@ -457,107 +464,58 @@ app.post('/webhook', async (req, res) => {
   }
 });
 
-// Website chatbot
 app.post('/chat', async (req, res) => {
   try {
     const { messages } = req.body;
-    if (!messages || !Array.isArray(messages)) {
-      return res.status(400).json({ error: 'messages array required' });
-    }
-    
-    if (!GROQ_API_KEY) {
+    if (!messages || !Array.isArray(messages)) return res.status(400).json({ error: 'messages array required' });
+    if (!GROQ_API_KEY || !groqClient) {
       return res.json({ reply: 'Hi! I am Zenvikai. We offer Gym App, School App, Salon Automation, Website Creation, Vendor Agent and Voice Agent. Book a free demo at zenvikai.com or WhatsApp +91 94913 99334!' });
     }
-
     console.log(`💬 Chat request: "${messages[messages.length-1]?.content?.slice(0,50)}"`);
-    
-    if (!groqClient) {
-      return res.json({ reply: 'Hi! I am Zenvikai. We offer Gym App, School App, Salon Automation, Website Creation, Vendor Agent and Voice Agent. Book a free demo at zenvikai.com or WhatsApp +91 94913 99334!' });
-    }
     const completion = await groqClient.chat.completions.create({
-      model: 'llama-3.1-8b-instant',
-      max_tokens: 250,
-      temperature: 0.7,
-      messages: [
-        { role: 'system', content: ZENVIK_PROMPT },
-        ...messages.slice(-8)
-      ]
+      model: 'llama-3.1-8b-instant', max_tokens: 250, temperature: 0.7,
+      messages: [{ role: 'system', content: ZENVIK_PROMPT }, ...messages.slice(-8)]
     });
     const reply = completion.choices?.[0]?.message?.content || 'Please WhatsApp us at +91 94913 99334!';
     console.log(`💬 Chat reply: "${reply.slice(0,50)}"`);
     res.json({ reply });
-  } catch (e) { 
+  } catch (e) {
     console.error('Chat error:', e.message);
-    res.json({ reply: 'Having trouble connecting. WhatsApp us at +91 94913 99334!' }); 
+    res.json({ reply: 'Having trouble connecting. WhatsApp us at +91 94913 99334!' });
   }
 });
 
-// Demo form
 app.post('/lead', async (req, res) => {
   try {
     const { name, phone, business, service, budget } = req.body;
     if (!name || !phone) return res.status(400).json({ error: 'Name and phone required' });
     const to = phone.replace(/\D/g,'').startsWith('91') ? phone.replace(/\D/g,'') : '91'+phone.replace(/\D/g,'');
-    // Add to Google Sheet and Calendar FIRST to get slot time
     const leadData = { name, phone, business, service, budget, source: 'website_form' };
     console.log('📊 Adding to Google Sheet and Calendar...');
-    
     let bookedSlot = null;
     try {
-      const [sheetDone, calendarResult] = await Promise.all([
-        addToSheet(leadData),
-        addToCalendar(leadData)
-      ]);
+      const [sheetDone, calendarResult] = await Promise.all([addToSheet(leadData), addToCalendar(leadData)]);
       if (sheetDone) console.log('✅ Lead added to Google Sheet');
-      else console.log('❌ Google Sheet failed');
-      if (calendarResult) {
-        bookedSlot = calendarResult.slot;
-        console.log('✅ Calendar event created:', formatIST(bookedSlot.start));
-      } else console.log('❌ Google Calendar failed');
-    } catch(googleErr) {
-      console.error('❌ Google integration error:', googleErr.message);
-    }
-
-    // Send confirmation with actual booked time
-    const slotText = bookedSlot 
+      if (calendarResult) { bookedSlot = calendarResult.slot; console.log('✅ Calendar event created:', formatIST(bookedSlot.start)); }
+    } catch(googleErr) { console.error('❌ Google integration error:', googleErr.message); }
+    const slotText = bookedSlot
       ? `📅 *Demo Scheduled:* ${formatIST(bookedSlot.start)}`
       : `📅 Our team will contact you within 2 hours to schedule your demo.`;
-
-    console.log(`📱 Sending confirmation to: ${to}`);
     try {
       await sendZenvik(to, `Hi ${name}! 👋\n\nThank you for your interest in *Zenvik AI*!\n\n✅ Demo request for *${service||'our services'}* confirmed!\n\n${slotText}\n\n📞 We'll call/WhatsApp you at this number.\n🌐 zenvikai.com | 📧 info@zenvikai.com\n\n— Team Zenvik AI`);
       console.log(`✅ Client confirmation sent to ${to}`);
-    } catch(clientErr) {
-      console.error(`❌ Client confirmation failed:`, clientErr.message);
-    }
-    
-    // Owner alert
+    } catch(clientErr) { console.error(`❌ Client confirmation failed:`, clientErr.message); }
     const ownerMsg = `🔔 *New Demo Request — Zenvik AI*\n\n👤 ${name}\n📱 ${phone}\n🏢 ${business||'-'}\n⚙️ ${service||'-'}\n💰 ${budget||'-'}\n${slotText}\n⏰ ${new Date().toLocaleString('en-IN',{timeZone:'Asia/Kolkata'})}`;
-    
     try {
       await sendZenvik(OWNER_PHONE, ownerMsg);
       console.log(`✅ Owner alert sent to ${OWNER_PHONE}`);
     } catch(alertErr) {
       console.error(`❌ Owner alert failed:`, alertErr.message);
-      // Try without formatting
-      try {
-        await sendZenvik(OWNER_PHONE, `New demo: ${name} ${phone} ${service||''}`);
-      } catch(e2) {
-        console.error('Owner alert retry failed:', e2.message);
-      }
+      try { await sendZenvik(OWNER_PHONE, `New demo: ${name} ${phone} ${service||''}`); } catch(e2) { console.error('Owner alert retry failed:', e2.message); }
     }
-
-    if (supabase) { 
-      try { 
-        await supabase.from('zenvik_leads').insert({ 
-          name, phone: to, 
-          message: `Demo: ${service}`, 
-          source: 'website_form', 
-          needs_attention: true 
-        }); 
-      } catch(e) { console.error('Supabase lead error:', e.message); } 
+    if (supabase) {
+      try { await supabase.from('zenvik_leads').insert({ name, phone: to, message: `Demo: ${service}`, source: 'website_form', needs_attention: true }); } catch(e) { console.error('Supabase lead error:', e.message); }
     }
-
     res.json({ success: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -565,7 +523,13 @@ app.post('/lead', async (req, res) => {
 // ── START ─────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, async () => {
-  console.log(`🚀 Zenvik AI Root Server v4.0 on port ${PORT}`);
+  console.log(`🚀 Zenvik AI Root Server v4.1 on port ${PORT}`);
   await loadGymNumbers();
+  // Refresh gym WhatsApp credentials every 5 minutes
   setInterval(loadGymNumbers, 5 * 60 * 1000);
+  // Process broadcast queue every 30 seconds
+  setInterval(processBroadcastQueue, 30 * 1000);
+  // Run once immediately on start (catches any pending rows from before restart)
+  setTimeout(processBroadcastQueue, 5000);
+  console.log('📨 Broadcast queue processor started (every 30s)');
 });
