@@ -300,32 +300,33 @@ async function processBroadcastQueue() {
           continue;
         }
 
-        // Determine recipient phones based on recipient_type
+        // Determine recipient phones + names based on recipient_type
         const recipientType = log.recipient_type || 'clients';
-        let phones = [];
+        let recipients = []; // [{phone, name}]
 
         if (recipientType === 'clients' || recipientType === 'both') {
           const { data: members } = await supabase
             .from('members')
-            .select('phone')
+            .select('phone, name')
             .eq('gym_id', log.gym_id)
             .eq('status', 'active');
-          phones.push(...(members || []).map(m => m.phone).filter(Boolean));
+          recipients.push(...(members || []).filter(m => m.phone).map(m => ({ phone: m.phone, name: m.name || 'Member' })));
         }
 
         if (recipientType === 'trainers' || recipientType === 'both') {
           const { data: trainers } = await supabase
             .from('profiles')
-            .select('phone')
+            .select('phone, name')
             .eq('gym_id', log.gym_id)
             .eq('role', 'trainer');
-          phones.push(...(trainers || []).map(t => t.phone).filter(Boolean));
+          recipients.push(...(trainers || []).filter(t => t.phone).map(t => ({ phone: t.phone, name: t.name || 'Trainer' })));
         }
 
-        // Deduplicate
-        phones = [...new Set(phones)];
+        // Deduplicate by phone
+        const seen = new Set();
+        recipients = recipients.filter(r => { if (seen.has(r.phone)) return false; seen.add(r.phone); return true; });
 
-        if (phones.length === 0) {
+        if (recipients.length === 0) {
           console.log(`ℹ️ No recipients found for gym ${gym.name} — marking sent`);
           await supabase
             .from('whatsapp_logs')
@@ -334,23 +335,50 @@ async function processBroadcastQueue() {
           continue;
         }
 
-        console.log(`📤 Sending to ${phones.length} recipients for [${gym.name}]...`);
+        console.log(`📤 Sending to ${recipients.length} recipients for [${gym.name}]...`);
 
-        // Send to each phone using the gym's own credentials
+        // Send to each recipient using approved WhatsApp template
         let sentCount = 0;
         let failCount = 0;
 
-        for (const phone of phones) {
+        for (const recipient of recipients) {
           try {
             // Normalize to E.164 (default +91 India)
-            let e164 = phone.replace(/[\s\-()]/g, '');
+            let e164 = recipient.phone.replace(/[\s\-()]/g, '');
             if (!e164.startsWith('+')) e164 = '+91' + e164.replace(/^0/, '');
             e164 = e164.replace('+', '');
 
-            await sendWA(gym.whatsapp_phone_id, gym.whatsapp_token, e164, log.message);
-            sentCount++;
+            // Use approved Meta template — works without 24hr conversation window
+            const r = await fetch(`https://graph.facebook.com/v19.0/${gym.whatsapp_phone_id}/messages`, {
+              method: 'POST',
+              headers: { 'Authorization': `Bearer ${gym.whatsapp_token}`, 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                messaging_product: 'whatsapp',
+                to: e164,
+                type: 'template',
+                template: {
+                  name: 'gym_broadcast',
+                  language: { code: 'en' },
+                  components: [{
+                    type: 'body',
+                    parameters: [
+                      { type: 'text', text: recipient.name },  // {{1}} member name
+                      { type: 'text', text: log.message },     // {{2}} broadcast message
+                      { type: 'text', text: gym.name },        // {{3}} gym name
+                    ]
+                  }]
+                }
+              })
+            });
+            const d = await r.json();
+            if (r.ok) {
+              sentCount++;
+            } else {
+              console.error(`❌ Template send failed to ${recipient.phone}:`, d.error?.message);
+              failCount++;
+            }
           } catch (sendErr) {
-            console.error(`❌ Failed to send to ${phone}:`, sendErr.message);
+            console.error(`❌ Failed to send to ${recipient.phone}:`, sendErr.message);
             failCount++;
           }
           // Small delay between messages to avoid Meta rate limits
