@@ -4,6 +4,7 @@ const cors = require('cors');
 const { createClient } = require('@supabase/supabase-js');
 const Groq = require('groq-sdk');
 const { google } = require('googleapis');
+const { handleGymMessage, handleGymInstagram } = require('./gymHandler');
 
 const app = express();
 app.use(cors({ origin: '*', methods: ['GET', 'POST', 'OPTIONS'], allowedHeaders: ['Content-Type', 'Authorization'] }));
@@ -254,16 +255,12 @@ async function groqReplyWithHistory(phone, text, name = 'Customer') {
 }
 
 // ── GYM BROADCAST PROCESSOR ───────────────────────────
-// Runs every 30 seconds — picks up pending whatsapp_logs rows inserted
-// by the GymApp broadcast feature and sends them via each gym's
-// configured WhatsApp number.
 let broadcastRunning = false;
 
 async function processBroadcastQueue() {
   if (!supabase || broadcastRunning) return;
   broadcastRunning = true;
   try {
-    // Fetch all pending broadcast rows
     const { data: pending, error } = await supabase
       .from('whatsapp_logs')
       .select('*')
@@ -277,14 +274,9 @@ async function processBroadcastQueue() {
     console.log(`📨 Processing ${pending.length} pending broadcast(s)...`);
 
     for (const log of pending) {
-      // Mark as processing immediately to avoid duplicate sends
-      await supabase
-        .from('whatsapp_logs')
-        .update({ status: 'processing' })
-        .eq('id', log.id);
+      await supabase.from('whatsapp_logs').update({ status: 'processing' }).eq('id', log.id);
 
       try {
-        // Get this gym's WhatsApp credentials
         const { data: gym } = await supabase
           .from('gyms')
           .select('whatsapp_phone_id, whatsapp_token, name')
@@ -293,84 +285,57 @@ async function processBroadcastQueue() {
 
         if (!gym?.whatsapp_phone_id || !gym?.whatsapp_token) {
           console.warn(`⚠️ No WhatsApp credentials for gym ${log.gym_id} — skipping`);
-          await supabase
-            .from('whatsapp_logs')
-            .update({ status: 'failed', fail_count: 0, sent_count: 0 })
-            .eq('id', log.id);
+          await supabase.from('whatsapp_logs').update({ status: 'failed', fail_count: 0, sent_count: 0 }).eq('id', log.id);
           continue;
         }
 
-        // Determine recipient phones based on recipient_type
         const recipientType = log.recipient_type || 'clients';
         let phones = [];
 
         if (recipientType === 'clients' || recipientType === 'both') {
-          const { data: members } = await supabase
-            .from('members')
-            .select('phone')
-            .eq('gym_id', log.gym_id)
-            .eq('status', 'active');
+          const { data: members } = await supabase.from('members').select('phone').eq('gym_id', log.gym_id).eq('status', 'active');
           phones.push(...(members || []).map(m => m.phone).filter(Boolean));
         }
 
         if (recipientType === 'trainers' || recipientType === 'both') {
-          const { data: trainers } = await supabase
-            .from('profiles')
-            .select('phone')
-            .eq('gym_id', log.gym_id)
-            .eq('role', 'trainer');
+          const { data: trainers } = await supabase.from('profiles').select('phone').eq('gym_id', log.gym_id).eq('role', 'trainer');
           phones.push(...(trainers || []).map(t => t.phone).filter(Boolean));
         }
 
-        // Deduplicate
         phones = [...new Set(phones)];
 
         if (phones.length === 0) {
           console.log(`ℹ️ No recipients found for gym ${gym.name} — marking sent`);
-          await supabase
-            .from('whatsapp_logs')
-            .update({ status: 'sent', sent_count: 0, fail_count: 0 })
-            .eq('id', log.id);
+          await supabase.from('whatsapp_logs').update({ status: 'sent', sent_count: 0, fail_count: 0 }).eq('id', log.id);
           continue;
         }
 
         console.log(`📤 Sending to ${phones.length} recipients for [${gym.name}]...`);
 
-        // Send to each phone using the gym's own credentials
         let sentCount = 0;
         let failCount = 0;
 
         for (const phone of phones) {
           try {
-            // Normalize to E.164 (default +91 India)
             let e164 = phone.replace(/[\s\-()]/g, '');
             if (!e164.startsWith('+')) e164 = '+91' + e164.replace(/^0/, '');
             e164 = e164.replace('+', '');
-
             await sendWA(gym.whatsapp_phone_id, gym.whatsapp_token, e164, log.message);
             sentCount++;
           } catch (sendErr) {
             console.error(`❌ Failed to send to ${phone}:`, sendErr.message);
             failCount++;
           }
-          // Small delay between messages to avoid Meta rate limits
           await new Promise(r => setTimeout(r, 200));
         }
 
         const finalStatus = failCount === 0 ? 'sent' : sentCount > 0 ? 'partial' : 'failed';
-        await supabase
-          .from('whatsapp_logs')
-          .update({ status: finalStatus, sent_count: sentCount, fail_count: failCount })
-          .eq('id', log.id);
-
+        await supabase.from('whatsapp_logs').update({ status: finalStatus, sent_count: sentCount, fail_count: failCount }).eq('id', log.id);
         console.log(`✅ Broadcast done for [${gym.name}]: ${sentCount} sent, ${failCount} failed`);
 
       } catch (logErr) {
         console.error(`❌ Error processing broadcast ${log.id}:`, logErr.message);
-        await supabase
-          .from('whatsapp_logs')
-          .update({ status: 'failed' })
-          .eq('id', log.id);
+        await supabase.from('whatsapp_logs').update({ status: 'failed' }).eq('id', log.id);
       }
     }
   } catch (e) {
@@ -396,17 +361,12 @@ async function handleZenvik(from, text, name) {
   forwardToRespondIO(from, text, name).catch(() => {});
 }
 
-async function handleGym(from, text, name, h) {
-  const reply = h.autoReply || `Hi! 👋 Thanks for reaching out to *${h.name}*. We'll get back to you shortly!\n\n_Powered by Zenvik AI_`;
-  await sendWA(ZENVIK_PHONE_ID, h.token || ZENVIK_WA_TOKEN, from, reply);
-  if (supabase && h.gymId) {
-    try { await supabase.from('leads').insert({ gym_id: h.gymId, name, phone: from, source: 'whatsapp', status: 'enquiry', notes: text }); } catch(e) {}
-    try { await supabase.from('notifications').insert({ gym_id: h.gymId, title: `📩 New Lead — ${name}`, body: `${name}: "${text.slice(0,100)}"`, type: 'lead', is_read: false }); } catch(e) {}
-  }
+async function handleGym(from, text, name, h, source = 'whatsapp') {
+  await handleGymMessage(from, text, name, h, source);
 }
 
 // ── ROUTES ────────────────────────────────────────────
-app.get('/', (req, res) => res.json({ status: 'Zenvik AI Root Server', version: '4.1', products: ['gym','school','salon','website','vendor','voice'] }));
+app.get('/', (req, res) => res.json({ status: 'Zenvik AI Root Server', version: '4.2', products: ['gym','school','salon','website','vendor','voice'] }));
 
 app.get('/webhook', (req, res) => {
   if (req.query['hub.mode'] === 'subscribe' && req.query['hub.verify_token'] === VERIFY_TOKEN) {
@@ -453,8 +413,7 @@ app.post('/webhook', async (req, res) => {
         if (supabase) {
           const { data: gym } = await supabase.from('gyms').select('id,name').eq('instagram_page_id', entry.id).maybeSingle();
           if (gym) {
-            try { await supabase.from('leads').insert({ gym_id: gym.id, name: 'Instagram User', phone: senderId, source: 'instagram', status: 'enquiry', notes: text }); } catch(e) {}
-            try { await supabase.from('notifications').insert({ gym_id: gym.id, title: '📸 New Instagram Lead', body: `"${text.slice(0,100)}"`, type: 'lead', is_read: false }); } catch(e) {}
+            handleGymInstagram(senderId, text, gym.id).catch(e => console.error('Instagram handler error:', e.message));
           } else {
             try { await supabase.from('zenvik_leads').insert({ name: `Instagram ${senderId}`, message: text, source: 'instagram' }); } catch(e) {}
           }
@@ -523,13 +482,10 @@ app.post('/lead', async (req, res) => {
 // ── START ─────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, async () => {
-  console.log(`🚀 Zenvik AI Root Server v4.1 on port ${PORT}`);
+  console.log(`🚀 Zenvik AI Root Server v4.2 on port ${PORT}`);
   await loadGymNumbers();
-  // Refresh gym WhatsApp credentials every 5 minutes
   setInterval(loadGymNumbers, 5 * 60 * 1000);
-  // Process broadcast queue every 30 seconds
   setInterval(processBroadcastQueue, 30 * 1000);
-  // Run once immediately on start (catches any pending rows from before restart)
   setTimeout(processBroadcastQueue, 5000);
   console.log('📨 Broadcast queue processor started (every 30s)');
 });
