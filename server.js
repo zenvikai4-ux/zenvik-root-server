@@ -255,16 +255,12 @@ async function groqReplyWithHistory(phone, text, name = 'Customer') {
 }
 
 // ── GYM BROADCAST PROCESSOR ───────────────────────────
-// Runs every 30 seconds — picks up pending whatsapp_logs rows inserted
-// by the GymApp broadcast feature and sends them via each gym's
-// configured WhatsApp number.
 let broadcastRunning = false;
 
 async function processBroadcastQueue() {
   if (!supabase || broadcastRunning) return;
   broadcastRunning = true;
   try {
-    // Fetch all pending broadcast rows
     const { data: pending, error } = await supabase
       .from('whatsapp_logs')
       .select('*')
@@ -278,14 +274,9 @@ async function processBroadcastQueue() {
     console.log(`📨 Processing ${pending.length} pending broadcast(s)...`);
 
     for (const log of pending) {
-      // Mark as processing immediately to avoid duplicate sends
-      await supabase
-        .from('whatsapp_logs')
-        .update({ status: 'processing' })
-        .eq('id', log.id);
+      await supabase.from('whatsapp_logs').update({ status: 'processing' }).eq('id', log.id);
 
       try {
-        // Get this gym's WhatsApp credentials
         const { data: gym } = await supabase
           .from('gyms')
           .select('whatsapp_phone_id, whatsapp_token, name')
@@ -294,62 +285,43 @@ async function processBroadcastQueue() {
 
         if (!gym?.whatsapp_phone_id || !gym?.whatsapp_token) {
           console.warn(`⚠️ No WhatsApp credentials for gym ${log.gym_id} — skipping`);
-          await supabase
-            .from('whatsapp_logs')
-            .update({ status: 'failed', fail_count: 0, sent_count: 0 })
-            .eq('id', log.id);
+          await supabase.from('whatsapp_logs').update({ status: 'failed', fail_count: 0, sent_count: 0 }).eq('id', log.id);
           continue;
         }
 
-        // Determine recipient phones + names based on recipient_type
         const recipientType = log.recipient_type || 'clients';
-        let recipients = []; // [{phone, name}]
+        let recipients = [];
 
         if (recipientType === 'clients' || recipientType === 'both') {
-          const { data: members } = await supabase
-            .from('members')
-            .select('phone, name')
-            .eq('gym_id', log.gym_id)
-            .eq('status', 'active');
+          const { data: members } = await supabase.from('members').select('phone, name').eq('gym_id', log.gym_id).eq('status', 'active');
           recipients.push(...(members || []).filter(m => m.phone).map(m => ({ phone: m.phone, name: m.name || 'Member' })));
         }
 
         if (recipientType === 'trainers' || recipientType === 'both') {
-          const { data: trainers } = await supabase
-            .from('profiles')
-            .select('phone, name')
-            .eq('gym_id', log.gym_id)
-            .eq('role', 'trainer');
+          const { data: trainers } = await supabase.from('profiles').select('phone, name').eq('gym_id', log.gym_id).eq('role', 'trainer');
           recipients.push(...(trainers || []).filter(t => t.phone).map(t => ({ phone: t.phone, name: t.name || 'Trainer' })));
         }
 
-        // Deduplicate by phone
         const seen = new Set();
         recipients = recipients.filter(r => { if (seen.has(r.phone)) return false; seen.add(r.phone); return true; });
 
         if (recipients.length === 0) {
           console.log(`ℹ️ No recipients found for gym ${gym.name} — marking sent`);
-          await supabase
-            .from('whatsapp_logs')
-            .update({ status: 'sent', sent_count: 0, fail_count: 0 })
-            .eq('id', log.id);
+          await supabase.from('whatsapp_logs').update({ status: 'sent', sent_count: 0, fail_count: 0 }).eq('id', log.id);
           continue;
         }
 
         console.log(`📤 Sending to ${recipients.length} recipients for [${gym.name}]...`);
 
-        // Send to each recipient using approved WhatsApp template
         let sentCount = 0;
         let failCount = 0;
 
         for (const recipient of recipients) {
           try {
-            // Normalize to E.164 (default +91 India)
             let e164 = recipient.phone.replace(/[\s\-()]/g, '');
             if (!e164.startsWith('+')) e164 = '+91' + e164.replace(/^0/, '');
             e164 = e164.replace('+', '');
 
-            // Use approved Meta template — works without 24hr conversation window
             const r = await fetch(`https://graph.facebook.com/v19.0/${gym.whatsapp_phone_id}/messages`, {
               method: 'POST',
               headers: { 'Authorization': `Bearer ${gym.whatsapp_token}`, 'Content-Type': 'application/json' },
@@ -363,18 +335,16 @@ async function processBroadcastQueue() {
                   components: [{
                     type: 'body',
                     parameters: [
-                      { type: 'text', text: recipient.name },  // {{1}} member name
-                      { type: 'text', text: log.message },     // {{2}} broadcast message
-                      { type: 'text', text: gym.name },        // {{3}} gym name
+                      { type: 'text', text: recipient.name },
+                      { type: 'text', text: log.message },
+                      { type: 'text', text: gym.name },
                     ]
                   }]
                 }
               })
             });
             const d = await r.json();
-            if (r.ok) {
-              sentCount++;
-            } else {
+            if (r.ok) { sentCount++; } else {
               console.error(`❌ Template send failed to ${recipient.phone}:`, d.error?.message);
               failCount++;
             }
@@ -382,24 +352,16 @@ async function processBroadcastQueue() {
             console.error(`❌ Failed to send to ${recipient.phone}:`, sendErr.message);
             failCount++;
           }
-          // Small delay between messages to avoid Meta rate limits
           await new Promise(r => setTimeout(r, 200));
         }
 
         const finalStatus = failCount === 0 ? 'sent' : sentCount > 0 ? 'partial' : 'failed';
-        await supabase
-          .from('whatsapp_logs')
-          .update({ status: finalStatus, sent_count: sentCount, fail_count: failCount })
-          .eq('id', log.id);
-
+        await supabase.from('whatsapp_logs').update({ status: finalStatus, sent_count: sentCount, fail_count: failCount }).eq('id', log.id);
         console.log(`✅ Broadcast done for [${gym.name}]: ${sentCount} sent, ${failCount} failed`);
 
       } catch (logErr) {
         console.error(`❌ Error processing broadcast ${log.id}:`, logErr.message);
-        await supabase
-          .from('whatsapp_logs')
-          .update({ status: 'failed' })
-          .eq('id', log.id);
+        await supabase.from('whatsapp_logs').update({ status: 'failed' }).eq('id', log.id);
       }
     }
   } catch (e) {
@@ -425,6 +387,7 @@ async function handleZenvik(from, text, name) {
   forwardToRespondIO(from, text, name).catch(() => {});
 }
 
+// ── CHANGE 2: handleGym now delegates to gymHandler ───
 async function handleGym(from, text, name, h, source = 'whatsapp') {
   await handleGymMessage(from, text, name, h, source);
 }
@@ -477,6 +440,7 @@ app.post('/webhook', async (req, res) => {
         if (supabase) {
           const { data: gym } = await supabase.from('gyms').select('id,name').eq('instagram_page_id', entry.id).maybeSingle();
           if (gym) {
+            // ── CHANGE 3: use gymHandler for Instagram leads ──
             handleGymInstagram(senderId, text, gym.id).catch(e => console.error('Instagram handler error:', e.message));
           } else {
             try { await supabase.from('zenvik_leads').insert({ name: `Instagram ${senderId}`, message: text, source: 'instagram' }); } catch(e) {}
@@ -546,13 +510,10 @@ app.post('/lead', async (req, res) => {
 // ── START ─────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, async () => {
-  console.log(`🚀 Zenvik AI Root Server v4.1 on port ${PORT}`);
+  console.log(`🚀 Zenvik AI Root Server v4.2 on port ${PORT}`);
   await loadGymNumbers();
-  // Refresh gym WhatsApp credentials every 5 minutes
   setInterval(loadGymNumbers, 5 * 60 * 1000);
-  // Process broadcast queue every 30 seconds
   setInterval(processBroadcastQueue, 30 * 1000);
-  // Run once immediately on start (catches any pending rows from before restart)
   setTimeout(processBroadcastQueue, 5000);
   console.log('📨 Broadcast queue processor started (every 30s)');
 });
