@@ -1,7 +1,7 @@
 {
-  "name": "zenvikai-root-server",
-  "version": "4.0.0",
-  "description": "Zenvik AI \u2014 Unified Root Server for all products",
+  "name": "zenvik-root-server",
+  "version": "4.1.0",
+  "description": "Zenvik AI \u2014 Unified Root Server",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
@@ -12,7 +12,7 @@
     "dotenv": "^16.3.1",
     "@supabase/supabase-js": "^2.38.0",
     "groq-sdk": "^0.3.3",
-    "node-fetch": "^3.3.2"
+    "googleapis": "^140.0.0"
   },
   "engines": {
     "node": ">=18.0.0"
