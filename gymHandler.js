@@ -161,7 +161,7 @@ Your job:
 2. Understand what the person is looking for (weight loss, muscle gain, etc.).
 3. Build interest and encourage them to visit.
 4. Keep replies SHORT — max 3-4 sentences. Use WhatsApp formatting (*bold*, line breaks).
-5. Always respond in the same language the person used (Telugu, Hindi, or English).
+5. Always respond in **English** unless the person writes to you in Telugu or Hindi first.
 6. NEVER make up information not given above. If unsure, say "our team will help you with that".
 7. Do NOT mention "handoff" or "pipeline" — just be natural.`;
 }
@@ -189,7 +189,7 @@ Member details:
 Your job:
 1. Answer the member's query accurately and helpfully.
 2. Keep replies SHORT — max 3 sentences.
-3. Respond in the same language they used.
+3. Respond in English unless the member writes in Telugu or Hindi.
 4. For account issues (payment, plan changes), say the gym team will assist them.`;
 }
 
