@@ -314,7 +314,9 @@ async function handleGymMessage(from, text, name, gymHandler, source = 'whatsapp
       return;
     }
 
-    const normalizedFrom = normalizePhone(from);
+    const normalizedFrom = normalizePhone(from); // 91XXXXXXXXXX (12 digits)
+    const tenDigit = normalizedFrom.length === 12 ? normalizedFrom.slice(2) : normalizedFrom; // XXXXXXXXXX (10 digits)
+    const phoneFilter = `phone.eq.${normalizedFrom},phone.eq.${tenDigit},phone.eq.${from}`;
 
     // ── 2. Check if existing member ───────────────────────────────────────
     if (automationConfig?.member_query_enabled !== false) {
@@ -322,7 +324,7 @@ async function handleGymMessage(from, text, name, gymHandler, source = 'whatsapp
         .from('members')
         .select('id, name, phone, plan, expiry_date, status')
         .eq('gym_id', gymId)
-        .or(`phone.eq.${normalizedFrom},phone.eq.${from}`)
+        .or(phoneFilter)
         .maybeSingle();
 
       if (member) {
@@ -334,7 +336,7 @@ async function handleGymMessage(from, text, name, gymHandler, source = 'whatsapp
 
         await sendGymWA(gymRow, from, reply);
         console.log(`✅ Member reply sent to ${member.name}`);
-        return;
+        return; // ← stop here, never enters lead pipeline
       }
     }
 
@@ -344,7 +346,7 @@ async function handleGymMessage(from, text, name, gymHandler, source = 'whatsapp
         .from('leads')
         .select('id, name, status, phone')
         .eq('gym_id', gymId)
-        .or(`phone.eq.${normalizedFrom},phone.eq.${from}`)
+        .or(phoneFilter)
         .not('status', 'in', '("converted","lost")')
         .maybeSingle();
 
@@ -427,13 +429,13 @@ async function handleGymMessage(from, text, name, gymHandler, source = 'whatsapp
       const aiReply = await generateLeadReply(text, [], systemPrompt)
         || `Hi! 👋 Welcome to *${gymRow.name}*! We'd love to help you reach your fitness goals. What are you looking for?`;
 
-      // Insert new lead
+      // Insert new lead — store phone as 10-digit for consistency with members table
       const { data: newLead, error: leadError } = await supabase
         .from('leads')
         .insert({
           gym_id: gymId,
           name: name || 'Unknown',
-          phone: normalizedFrom,
+          phone: tenDigit, // consistent 10-digit format
           source,
           status: 'ai_chatting',
           notes: text,
