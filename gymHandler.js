@@ -13,6 +13,9 @@
  *
  * Handoff: AI detects intent to visit/speak to owner → notifies owner via
  *          in-app notification + WhatsApp alert to gym owner number.
+ *
+ * 2hr silence rule: If owner replied within 2hrs AND lead is in AI stage → AI stays silent
+ * Manual stage rule: If lead is in handoff+ stage → AI never responds, just saves message
  */
 
 const Groq = require('groq-sdk');
@@ -40,9 +43,6 @@ async function sendWhatsAppMessage(phoneId, token, to, message) {
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 
-/**
- * Normalize phone to E.164 digits only (91XXXXXXXXXX)
- */
 function normalizePhone(phone) {
   let p = String(phone).replace(/[^0-9]/g, '');
   if (p.length === 10) p = '91' + p;
@@ -50,9 +50,6 @@ function normalizePhone(phone) {
   return p;
 }
 
-/**
- * Send WhatsApp message using a gym's credentials
- */
 async function sendGymWA(gym, to, message) {
   const phoneId = gym.whatsapp_phone_id;
   const token   = gym.whatsapp_token || process.env.ZENVIK_WA_TOKEN;
@@ -61,9 +58,6 @@ async function sendGymWA(gym, to, message) {
   await sendWhatsAppMessage(phoneId, token, formatted, message);
 }
 
-/**
- * Insert in-app notification for gym owner
- */
 async function insertNotification(gymId, title, body, type = 'lead') {
   const { error } = await supabase.from('notifications').insert({
     gym_id: gymId, title, body, type, is_read: false,
@@ -71,9 +65,6 @@ async function insertNotification(gymId, title, body, type = 'lead') {
   if (error) console.error('Notification insert error:', error.message);
 }
 
-/**
- * Save a conversation message to lead_conversations
- */
 async function saveConversation(leadId, gymId, role, message) {
   const { error } = await supabase.from('lead_conversations').insert({
     lead_id: leadId, gym_id: gymId, role, message,
@@ -81,9 +72,6 @@ async function saveConversation(leadId, gymId, role, message) {
   if (error) console.error('Conversation save error:', error.message);
 }
 
-/**
- * Fetch last N messages for a lead (for AI context)
- */
 async function getConversationHistory(leadId, limit = 10) {
   const { data } = await supabase
     .from('lead_conversations')
@@ -91,12 +79,9 @@ async function getConversationHistory(leadId, limit = 10) {
     .eq('lead_id', leadId)
     .order('created_at', { ascending: false })
     .limit(limit);
-  return (data || []).reverse(); // oldest first
+  return (data || []).reverse();
 }
 
-/**
- * Fetch gym knowledge base
- */
 async function getGymKnowledge(gymId) {
   const { data } = await supabase
     .from('gym_knowledge_base')
@@ -106,9 +91,6 @@ async function getGymKnowledge(gymId) {
   return data || null;
 }
 
-/**
- * Fetch gym automation config
- */
 async function getGymAutomationConfig(gymId) {
   const { data } = await supabase
     .from('gym_automation_config')
@@ -118,9 +100,6 @@ async function getGymAutomationConfig(gymId) {
   return data || null;
 }
 
-/**
- * Build AI system prompt from gym knowledge base
- */
 function buildGymSystemPrompt(gym, knowledge) {
   const plans = Array.isArray(knowledge?.membership_plans)
     ? knowledge.membership_plans.map(p => `  - ${p.name}: ₹${p.price} / ${p.duration}${p.description ? ' (' + p.description + ')' : ''}`).join('\n')
@@ -166,9 +145,6 @@ Your job:
 7. Do NOT mention "handoff" or "pipeline" — just be natural.`;
 }
 
-/**
- * Build member system prompt for query answering
- */
 function buildMemberSystemPrompt(gym, knowledge, member) {
   return `You are a helpful assistant for *${knowledge?.gym_name || gym.name}* gym.
 You are talking to an existing member named ${member.name}.
@@ -193,9 +169,6 @@ Your job:
 4. For account issues (payment, plan changes), say the gym team will assist them.`;
 }
 
-/**
- * Detect if AI should hand off to the owner
- */
 function shouldHandoff(message, config) {
   const defaultKeywords = ['price', 'pricing', 'fees', 'want to join', 'visit', 'come in',
     'talk to someone', 'owner', 'manager', 'call me', 'speak to', 'interested'];
@@ -204,9 +177,6 @@ function shouldHandoff(message, config) {
   return keywords.some(k => lower.includes(k.toLowerCase()));
 }
 
-/**
- * Detect if a lead is showing interest (for pipeline auto-advance)
- */
 async function detectInterest(message) {
   try {
     const completion = await groq.chat.completions.create({
@@ -226,9 +196,6 @@ async function detectInterest(message) {
   }
 }
 
-/**
- * Generate AI reply for a lead
- */
 async function generateLeadReply(message, conversationHistory, systemPrompt) {
   try {
     const messages = [
@@ -253,9 +220,6 @@ async function generateLeadReply(message, conversationHistory, systemPrompt) {
   }
 }
 
-/**
- * Generate AI reply for a member query
- */
 async function generateMemberReply(message, systemPrompt) {
   try {
     const completion = await groq.chat.completions.create({
@@ -274,21 +238,16 @@ async function generateMemberReply(message, systemPrompt) {
   }
 }
 
-// ── Main handler ──────────────────────────────────────────────────────────
+// ── Stage constants ───────────────────────────────────────────────────────
+const AI_STAGES     = ['new', 'ai_chatting', 'interested'];
+const MANUAL_STAGES = ['handoff', 'visit_scheduled', 'visited', 'converted', 'lost'];
+const TWO_HOURS_MS  = 2 * 60 * 60 * 1000;
 
-/**
- * Main entry point — called for every incoming gym WhatsApp message
- * @param {string} from       - Sender phone (digits only, with country code)
- * @param {string} text       - Message text
- * @param {string} name       - Sender display name from WhatsApp
- * @param {object} gymHandler - { gymId, name, token, autoReply } from PRODUCT_HANDLERS
- * @param {string} source     - 'whatsapp' | 'instagram'
- */
+// ── Main handler ──────────────────────────────────────────────────────────
 async function handleGymMessage(from, text, name, gymHandler, source = 'whatsapp') {
   const { gymId } = gymHandler;
 
   try {
-    // ── 1. Fetch gym config and knowledge in parallel ─────────────────────
     const [gymRow, knowledge, automationConfig] = await Promise.all([
       supabase.from('gyms')
         .select('id, name, whatsapp_phone_id, whatsapp_token, whatsapp_number, owner_phone')
@@ -304,7 +263,6 @@ async function handleGymMessage(from, text, name, gymHandler, source = 'whatsapp
       return;
     }
 
-    // Check if automation is enabled for this source
     if (source === 'whatsapp' && automationConfig?.whatsapp_automation_enabled === false) {
       console.log(`ℹ️ WhatsApp automation disabled for gym ${gymRow.name}`);
       return;
@@ -314,8 +272,8 @@ async function handleGymMessage(from, text, name, gymHandler, source = 'whatsapp
       return;
     }
 
-    const normalizedFrom = normalizePhone(from); // 91XXXXXXXXXX (12 digits)
-    const tenDigit = normalizedFrom.length === 12 ? normalizedFrom.slice(2) : normalizedFrom; // XXXXXXXXXX (10 digits)
+    const normalizedFrom = normalizePhone(from);
+    const tenDigit = normalizedFrom.length === 12 ? normalizedFrom.slice(2) : normalizedFrom;
     const phoneFilter = `phone.eq.${normalizedFrom},phone.eq.${tenDigit},phone.eq.${from}`;
 
     // ── 2. Check if existing member ───────────────────────────────────────
@@ -329,14 +287,12 @@ async function handleGymMessage(from, text, name, gymHandler, source = 'whatsapp
 
       if (member) {
         console.log(`👤 Existing member: ${member.name} (${gymRow.name})`);
-
         const memberPrompt = buildMemberSystemPrompt(gymRow, knowledge, member);
         const reply = await generateMemberReply(text, memberPrompt)
           || `Hi ${member.name}! 👋 For any queries, please contact our gym team directly.`;
-
         await sendGymWA(gymRow, from, reply);
         console.log(`✅ Member reply sent to ${member.name}`);
-        return; // ← stop here, never enters lead pipeline
+        return;
       }
     }
 
@@ -344,7 +300,7 @@ async function handleGymMessage(from, text, name, gymHandler, source = 'whatsapp
     if (automationConfig?.lead_pipeline_enabled !== false) {
       const { data: existingLead } = await supabase
         .from('leads')
-        .select('id, name, status, phone')
+        .select('id, name, status, phone, owner_last_replied_at')
         .eq('gym_id', gymId)
         .or(phoneFilter)
         .not('status', 'in', '("converted","lost")')
@@ -353,13 +309,10 @@ async function handleGymMessage(from, text, name, gymHandler, source = 'whatsapp
       if (existingLead) {
         console.log(`🔄 Existing lead: ${existingLead.name} — stage: ${existingLead.status}`);
 
-        // If already handed off, don't auto-reply (owner is handling)
-        if (existingLead.status === 'handoff' || existingLead.status === 'visit_scheduled'
-          || existingLead.status === 'visited') {
-          console.log(`ℹ️ Lead ${existingLead.name} is in manual stage — skipping AI reply`);
-          // Just save the message for owner to see
+        // ── MANUAL STAGE: AI never responds, just saves + notifies owner ──
+        if (MANUAL_STAGES.includes(existingLead.status)) {
+          console.log(`👤 Lead in manual stage (${existingLead.status}) — AI not responding`);
           await saveConversation(existingLead.id, gymId, 'lead', text);
-          // Notify owner of new message
           await insertNotification(
             gymId,
             `💬 New message from ${existingLead.name}`,
@@ -369,29 +322,35 @@ async function handleGymMessage(from, text, name, gymHandler, source = 'whatsapp
           return;
         }
 
-        // Continue AI conversation
+        // ── 2HR SILENCE RULE: Owner replied recently → AI stays silent ───
+        if (existingLead.owner_last_replied_at) {
+          const ownerRepliedAt = new Date(existingLead.owner_last_replied_at).getTime();
+          const timeSinceOwnerReply = Date.now() - ownerRepliedAt;
+          if (timeSinceOwnerReply < TWO_HOURS_MS && AI_STAGES.includes(existingLead.status)) {
+            console.log(`🤫 Owner replied ${Math.round(timeSinceOwnerReply / 60000)}min ago — AI staying silent for ${existingLead.name}`);
+            await saveConversation(existingLead.id, gymId, 'lead', text);
+            return;
+          }
+        }
+
+        // ── AI STAGE: Continue conversation ───────────────────────────────
         const history = await getConversationHistory(existingLead.id);
         const systemPrompt = buildGymSystemPrompt(gymRow, knowledge);
         const aiReply = await generateLeadReply(text, history, systemPrompt)
           || `Hi! Thanks for your message. Our team will get back to you shortly. 😊`;
 
-        // Save both messages
         await saveConversation(existingLead.id, gymId, 'lead', text);
         await saveConversation(existingLead.id, gymId, 'ai', aiReply);
-
-        // Send reply
         await sendGymWA(gymRow, from, aiReply);
 
-        // Detect pipeline stage advancement
-        const isHandoff = shouldHandoff(text, automationConfig);
+        // Detect pipeline advancement
+        const isHandoff   = shouldHandoff(text, automationConfig);
         const isInterested = !isHandoff && await detectInterest(text);
 
         if (isHandoff && existingLead.status !== 'handoff') {
-          // Move to handoff
           await supabase.from('leads').update({ status: 'handoff' }).eq('id', existingLead.id);
           console.log(`🔔 Lead ${existingLead.name} → handoff`);
 
-          // Notify owner in-app
           await insertNotification(
             gymId,
             `🔔 Lead Ready — ${existingLead.name}`,
@@ -399,7 +358,6 @@ async function handleGymMessage(from, text, name, gymHandler, source = 'whatsapp
             'handoff'
           );
 
-          // Alert owner on WhatsApp if they have a number
           const ownerPhone = gymRow.owner_phone || automationConfig?.owner_whatsapp;
           if (ownerPhone) {
             const ownerMsg = `🔔 *Lead Handoff — ${gymRow.name}*\n\n👤 *${existingLead.name}*\n📱 +${normalizedFrom}\n💬 "${text.slice(0, 100)}"\n\n✅ AI has handed off — this lead is ready to speak with you!`;
@@ -407,12 +365,10 @@ async function handleGymMessage(from, text, name, gymHandler, source = 'whatsapp
           }
 
         } else if (isInterested && existingLead.status === 'ai_chatting') {
-          // Advance to interested
           await supabase.from('leads').update({ status: 'interested' }).eq('id', existingLead.id);
           console.log(`⭐ Lead ${existingLead.name} → interested`);
 
         } else if (existingLead.status === 'new') {
-          // First AI reply — move to ai_chatting
           await supabase.from('leads').update({ status: 'ai_chatting' }).eq('id', existingLead.id);
           console.log(`💬 Lead ${existingLead.name} → ai_chatting`);
         }
@@ -420,22 +376,19 @@ async function handleGymMessage(from, text, name, gymHandler, source = 'whatsapp
         return;
       }
 
-      // ── 4. Brand new contact — create lead and start pipeline ───────────
+      // ── 4. Brand new contact ──────────────────────────────────────────
       console.log(`🆕 New contact from ${from} (${gymRow.name})`);
 
       const systemPrompt = buildGymSystemPrompt(gymRow, knowledge);
-
-      // Generate first AI reply
       const aiReply = await generateLeadReply(text, [], systemPrompt)
         || `Hi! 👋 Welcome to *${gymRow.name}*! We'd love to help you reach your fitness goals. What are you looking for?`;
 
-      // Insert new lead — store phone as 10-digit for consistency with members table
       const { data: newLead, error: leadError } = await supabase
         .from('leads')
         .insert({
           gym_id: gymId,
           name: name || 'Unknown',
-          phone: tenDigit, // consistent 10-digit format
+          phone: tenDigit,
           source,
           status: 'ai_chatting',
           notes: text,
@@ -449,14 +402,10 @@ async function handleGymMessage(from, text, name, gymHandler, source = 'whatsapp
         return;
       }
 
-      // Save conversation
       await saveConversation(newLead.id, gymId, 'lead', text);
       await saveConversation(newLead.id, gymId, 'ai', aiReply);
-
-      // Send reply
       await sendGymWA(gymRow, from, aiReply);
 
-      // In-app notification for new lead
       await insertNotification(
         gymId,
         `🆕 New Lead — ${name || 'Unknown'}`,
@@ -472,9 +421,6 @@ async function handleGymMessage(from, text, name, gymHandler, source = 'whatsapp
   }
 }
 
-/**
- * Handle incoming Instagram DM for a gym
- */
 async function handleGymInstagram(senderId, text, gymId) {
   const fakeHandler = { gymId };
   await handleGymMessage(senderId, text, 'Instagram User', fakeHandler, 'instagram');
