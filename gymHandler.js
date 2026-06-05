@@ -51,7 +51,7 @@ function normalizePhone(phone) {
 }
 
 async function sendGymWA(gym, to, message) {
-  const phoneId = gym.whatsapp_phone_id;
+  const phoneId = gym.whatsapp_phone_id || process.env.ZENVIK_PHONE_ID;
   const token   = gym.whatsapp_token || process.env.ZENVIK_WA_TOKEN;
   if (!phoneId) { console.warn(`⚠️ No phone ID for gym ${gym.name}`); return; }
   const formatted = normalizePhone(to);
@@ -378,6 +378,23 @@ async function handleGymMessage(from, text, name, gymHandler, source = 'whatsapp
 
       // ── 4. Brand new contact ──────────────────────────────────────────
       console.log(`🆕 New contact from ${from} (${gymRow.name})`);
+
+      // Check if Lead Management module is enabled for this gym
+      const { data: leadModule } = await supabase
+        .from('gym_modules')
+        .select('is_enabled, module:modules(name)')
+        .eq('gym_id', gymId)
+        .eq('is_enabled', true)
+        .then(async r => {
+          const modules = r.data || [];
+          const hasLead = modules.some((m: any) => m.module?.name?.toLowerCase().includes('lead'));
+          return { data: hasLead };
+        });
+
+      if (!leadModule) {
+        console.log(`ℹ️ Lead Management module not enabled for ${gymRow.name} — ignoring unknown number`);
+        return;
+      }
 
       const systemPrompt = buildGymSystemPrompt(gymRow, knowledge);
       const aiReply = await generateLeadReply(text, [], systemPrompt)
