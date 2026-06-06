@@ -380,18 +380,15 @@ async function handleGymMessage(from, text, name, gymHandler, source = 'whatsapp
       console.log(`🆕 New contact from ${from} (${gymRow.name})`);
 
       // Check if Lead Management module is enabled for this gym
-      const { data: leadModule } = await supabase
+      const { data: gymModules } = await supabase
         .from('gym_modules')
         .select('is_enabled, module:modules(name)')
         .eq('gym_id', gymId)
-        .eq('is_enabled', true)
-        .then(async r => {
-          const modules = r.data || [];
-          const hasLead = modules.some((m: any) => m.module?.name?.toLowerCase().includes('lead'));
-          return { data: hasLead };
-        });
+        .eq('is_enabled', true);
 
-      if (!leadModule) {
+      const hasLeadModule = (gymModules || []).some(m => m.module?.name?.toLowerCase().includes('lead'));
+
+      if (!hasLeadModule) {
         console.log(`ℹ️ Lead Management module not enabled for ${gymRow.name} — ignoring unknown number`);
         return;
       }
