@@ -255,7 +255,40 @@ async function groqReplyWithHistory(phone, text, name = 'Customer') {
 }
 
 // ── GYM BROADCAST PROCESSOR ───────────────────────────
+// This queue is a fallback path (legacy trainer-broadcast-to-my-clients
+// flow). The primary owner broadcast flow calls the gym server's
+// /broadcast endpoint directly and is already personalized — this queue
+// must match that behavior: every recipient gets their OWN name filled
+// into the gym_broadcast template, never log.message sent raw/identical
+// to everyone (that was the "Dear Sharukh for everyone" bug).
 let broadcastRunning = false;
+
+async function sendBroadcastTemplate(phoneId, token, to, recipientName, message, gymName) {
+  const r = await fetch(`https://graph.facebook.com/v19.0/${phoneId}/messages`, {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      messaging_product: 'whatsapp',
+      to: String(to).replace(/\D/g, ''),
+      type: 'template',
+      template: {
+        name: 'gym_broadcast',
+        language: { code: 'en' },
+        components: [{
+          type: 'body',
+          parameters: [
+            { type: 'text', text: recipientName || 'Member' }, // {{1}} = THIS recipient's own name
+            { type: 'text', text: message },                    // {{2}} = broadcast message
+            { type: 'text', text: gymName || 'Your Gym' },       // {{3}} = gym name
+          ]
+        }]
+      }
+    })
+  });
+  const d = await r.json();
+  if (!r.ok) throw new Error(d.error?.message || 'WA send failed');
+  return d;
+}
 
 async function processBroadcastQueue() {
   if (!supabase || broadcastRunning) return;
@@ -279,7 +312,7 @@ async function processBroadcastQueue() {
       try {
         const { data: gym } = await supabase
           .from('gyms')
-          .select('whatsapp_phone_id, whatsapp_token, name')
+          .select('id, name, whatsapp_phone_id, whatsapp_token, broadcasts_per_month')
           .eq('id', log.gym_id)
           .single();
 
@@ -289,41 +322,69 @@ async function processBroadcastQueue() {
           continue;
         }
 
+        // Enforce the monthly broadcast limit here too, as a safety net —
+        // the primary enforcement lives in the app, but this queue can be
+        // reached by older app builds / the trainer "my clients" flow.
+        const monthStart = new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString();
+        const { count: usedThisMonth } = await supabase
+          .from('whatsapp_logs')
+          .select('id', { count: 'exact', head: true })
+          .eq('gym_id', log.gym_id)
+          .is('phone', null)
+          .in('status', ['sent', 'partial'])
+          .gte('created_at', monthStart);
+        const limit = gym.broadcasts_per_month ?? 1;
+        if ((usedThisMonth ?? 0) >= limit) {
+          console.warn(`⚠️ Monthly broadcast limit reached for gym ${gym.name} — skipping queued broadcast`);
+          await supabase.from('whatsapp_logs').update({ status: 'failed', fail_count: 0, sent_count: 0 }).eq('id', log.id);
+          continue;
+        }
+
         const recipientType = log.recipient_type || 'clients';
-        let phones = [];
+        let recipients = []; // { name, phone }[]
 
         if (recipientType === 'clients' || recipientType === 'both') {
-          const { data: members } = await supabase.from('members').select('phone').eq('gym_id', log.gym_id).eq('status', 'active');
-          phones.push(...(members || []).map(m => m.phone).filter(Boolean));
+          let memberQuery = supabase.from('members').select('name, phone').eq('gym_id', log.gym_id).eq('status', 'active');
+          // If this broadcast came from a trainer's "my clients" button,
+          // scope it to that trainer's own assigned members only.
+          if (log.trainer_id) memberQuery = memberQuery.eq('trainer_id', log.trainer_id);
+          const { data: members } = await memberQuery;
+          (members || []).forEach(m => { if (m.phone) recipients.push({ name: m.name, phone: m.phone }); });
         }
 
         if (recipientType === 'trainers' || recipientType === 'both') {
-          const { data: trainers } = await supabase.from('profiles').select('phone').eq('gym_id', log.gym_id).eq('role', 'trainer');
-          phones.push(...(trainers || []).map(t => t.phone).filter(Boolean));
+          const { data: trainers } = await supabase.from('profiles').select('name, phone').eq('gym_id', log.gym_id).eq('role', 'trainer');
+          (trainers || []).forEach(t => { if (t.phone) recipients.push({ name: t.name, phone: t.phone }); });
         }
 
-        phones = [...new Set(phones)];
+        // de-dupe by phone, keeping first occurrence's name
+        const seen = new Set();
+        recipients = recipients.filter(r => {
+          if (seen.has(r.phone)) return false;
+          seen.add(r.phone);
+          return true;
+        });
 
-        if (phones.length === 0) {
+        if (recipients.length === 0) {
           console.log(`ℹ️ No recipients found for gym ${gym.name} — marking sent`);
           await supabase.from('whatsapp_logs').update({ status: 'sent', sent_count: 0, fail_count: 0 }).eq('id', log.id);
           continue;
         }
 
-        console.log(`📤 Sending to ${phones.length} recipients for [${gym.name}]...`);
+        console.log(`📤 Sending to ${recipients.length} recipients for [${gym.name}]...`);
 
         let sentCount = 0;
         let failCount = 0;
 
-        for (const phone of phones) {
+        for (const recipient of recipients) {
           try {
-            let e164 = phone.replace(/[\s\-()]/g, '');
+            let e164 = recipient.phone.replace(/[\s\-()]/g, '');
             if (!e164.startsWith('+')) e164 = '+91' + e164.replace(/^0/, '');
             e164 = e164.replace('+', '');
-            await sendWA(gym.whatsapp_phone_id, gym.whatsapp_token, e164, log.message);
+            await sendBroadcastTemplate(gym.whatsapp_phone_id, gym.whatsapp_token, e164, recipient.name, log.message, gym.name);
             sentCount++;
           } catch (sendErr) {
-            console.error(`❌ Failed to send to ${phone}:`, sendErr.message);
+            console.error(`❌ Failed to send to ${recipient.phone} (${recipient.name}):`, sendErr.message);
             failCount++;
           }
           await new Promise(r => setTimeout(r, 200));
