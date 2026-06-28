@@ -51,8 +51,13 @@ function normalizePhone(phone) {
 }
 
 async function sendGymWA(gym, to, message) {
-  const phoneId = gym.whatsapp_phone_id || process.env.ZENVIK_PHONE_ID;
-  const token   = gym.whatsapp_token || process.env.ZENVIK_WA_TOKEN;
+  // Do NOT fall back to ZENVIK_PHONE_ID/ZENVIK_WA_TOKEN here — those are the
+  // website chatbot's own number/token. A gym lead/handoff message must only
+  // ever go out from that specific gym's own configured WhatsApp number, or
+  // not at all if the gym has none configured. Falling back to the website
+  // number mixes the two numbers, which is explicitly the thing to avoid.
+  const phoneId = gym.whatsapp_phone_id;
+  const token   = gym.whatsapp_token;
   if (!phoneId) { console.warn(`⚠️ No phone ID for gym ${gym.name}`); return; }
   const formatted = normalizePhone(to);
   await sendWhatsAppMessage(phoneId, token, formatted, message);
